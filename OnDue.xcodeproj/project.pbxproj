@@ -6,14 +6,114 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		9A28A5D72F285EAF00B0DB3C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 9A28A5BE2F285EAF00B0DB3C /* Assets.xcassets */; };
+		9A28A5D82F285EAF00B0DB3C /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = 9A28A5BF2F285EAF00B0DB3C /* README.md */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		9A28A4822F27AD0F00B0DB3C /* OnDue.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OnDue.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		9A28A5BE2F285EAF00B0DB3C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		9A28A5BF2F285EAF00B0DB3C /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		9A28A6142F28671200B0DB3C /* Exceptions for "Data" folder in "OnDue" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Database/Database.swift,
+				Database/FTS.swift,
+				Database/Migrations.swift,
+				Repositories/EmailSnippetRepository.swift,
+				Repositories/ObligationRepository.swift,
+			);
+			target = 9A28A4812F27AD0F00B0DB3C /* OnDue */;
+		};
+		9A28A6152F28671200B0DB3C /* Exceptions for "Features" folder in "OnDue" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Connect/ConnectGmailView.swift,
+				Connect/ConnectGmailViewModel.swift,
+				Digest/DigestView.swift,
+				Digest/DigestViewModel.swift,
+			);
+			target = 9A28A4812F27AD0F00B0DB3C /* OnDue */;
+		};
+		9A28A6162F28671200B0DB3C /* Exceptions for "Models" folder in "OnDue" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				EmailSnippet.swift,
+				EvidenceLine.swift,
+				Obligation.swift,
+				SenderRule.swift,
+			);
+			target = 9A28A4812F27AD0F00B0DB3C /* OnDue */;
+		};
+		9A28A6172F28671200B0DB3C /* Exceptions for "Services" folder in "OnDue" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Background/BackgroundRefreshService.swift,
+				Extraction/ObligationExtractor.swift,
+				Gmail/GmailAuthService.swift,
+				Gmail/GmailClient.swift,
+				Gmail/GmailSyncService.swift,
+			);
+			target = 9A28A4812F27AD0F00B0DB3C /* OnDue */;
+		};
+		9A28A6182F28671200B0DB3C /* Exceptions for "Utilities" folder in "OnDue" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				DateParsing.swift,
+				Logger.swift,
+			);
+			target = 9A28A4812F27AD0F00B0DB3C /* OnDue */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		9A28A4842F27AD0F00B0DB3C /* OnDue */ = {
+		9A28A5DC2F28671200B0DB3C /* App */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = OnDue;
+			path = App;
+			sourceTree = "<group>";
+		};
+		9A28A5E42F28671200B0DB3C /* Data */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				9A28A6142F28671200B0DB3C /* Exceptions for "Data" folder in "OnDue" target */,
+			);
+			path = Data;
+			sourceTree = "<group>";
+		};
+		9A28A5EB2F28671200B0DB3C /* Features */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				9A28A6152F28671200B0DB3C /* Exceptions for "Features" folder in "OnDue" target */,
+			);
+			path = Features;
+			sourceTree = "<group>";
+		};
+		9A28A5F02F28671200B0DB3C /* Models */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				9A28A6162F28671200B0DB3C /* Exceptions for "Models" folder in "OnDue" target */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		9A28A5F92F28671200B0DB3C /* Services */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				9A28A6172F28671200B0DB3C /* Exceptions for "Services" folder in "OnDue" target */,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+		9A28A5FC2F28671200B0DB3C /* Utilities */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				9A28A6182F28671200B0DB3C /* Exceptions for "Utilities" folder in "OnDue" target */,
+			);
+			path = Utilities;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -32,8 +132,15 @@
 		9A28A4792F27AD0F00B0DB3C = {
 			isa = PBXGroup;
 			children = (
-				9A28A4842F27AD0F00B0DB3C /* OnDue */,
 				9A28A4832F27AD0F00B0DB3C /* Products */,
+				9A28A5DC2F28671200B0DB3C /* App */,
+				9A28A5E42F28671200B0DB3C /* Data */,
+				9A28A5EB2F28671200B0DB3C /* Features */,
+				9A28A5F02F28671200B0DB3C /* Models */,
+				9A28A5F92F28671200B0DB3C /* Services */,
+				9A28A5FC2F28671200B0DB3C /* Utilities */,
+				9A28A5BE2F285EAF00B0DB3C /* Assets.xcassets */,
+				9A28A5BF2F285EAF00B0DB3C /* README.md */,
 			);
 			sourceTree = "<group>";
 		};
@@ -61,7 +168,7 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				9A28A4842F27AD0F00B0DB3C /* OnDue */,
+				9A28A5DC2F28671200B0DB3C /* App */,
 			);
 			name = OnDue;
 			packageProductDependencies = (
@@ -109,6 +216,8 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				9A28A5D72F285EAF00B0DB3C /* Assets.xcassets in Resources */,
+				9A28A5D82F285EAF00B0DB3C /* README.md in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
