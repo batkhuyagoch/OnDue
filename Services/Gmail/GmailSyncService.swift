@@ -1,32 +1,38 @@
 import Foundation
 
-protocol GmailSyncServicing {
-    func initialSync(daysBack: Int) async throws
+protocol GmailSyncServicing: Sendable {
+    func initialSync(mailboxAccountId: String, daysBack: Int) async throws
 }
 
-final class GmailSyncService: GmailSyncServicing {
+final class GmailSyncService: GmailSyncServicing, @unchecked Sendable {
     private let database: Database
     private let client: GmailClienting
-    private let snippetRepository: EmailSnippetRepositorying
-
+    private let messageRepository: MessageRepositorying
+    
     init(database: Database, client: GmailClienting = GmailClient()) {
         self.database = database
         self.client = client
-        self.snippetRepository = EmailSnippetRepository(database: database)
+        self.messageRepository = MessageRepository(database: database)
     }
-
-    func initialSync(daysBack: Int) async throws {
-        let messages = try await client.fetchMessages(daysBack: daysBack)
-        let snippets = messages.map {
-            EmailSnippet(
-                id: UUID(),
-                messageID: $0.messageID,
-                sender: $0.sender,
-                subject: $0.subject,
-                snippet: $0.snippet,
-                receivedAt: $0.receivedAt
+    
+    func initialSync(mailboxAccountId: String, daysBack: Int) async throws {
+        let summaries = try await client.fetchMessages(daysBack: daysBack)
+        
+        let messages = summaries.map { summary in
+            MessageRecord(
+                mailboxAccountId: mailboxAccountId,
+                providerMessageId: summary.messageID,
+                threadId: summary.threadID,
+                internalDate: summary.receivedAt,
+                fromEmail: summary.sender,
+                fromName: summary.senderName,
+                subject: summary.subject,
+                snippet: summary.snippet,
+                hasAttachments: summary.hasAttachments,
+                labelIds: summary.labelIDs.joined(separator: ",")
             )
         }
-        try await snippetRepository.save(snippets)
+        
+        try await messageRepository.save(messages)
     }
 }

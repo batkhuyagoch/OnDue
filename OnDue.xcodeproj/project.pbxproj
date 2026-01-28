@@ -9,12 +9,19 @@
 /* Begin PBXBuildFile section */
 		9A28A5D72F285EAF00B0DB3C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 9A28A5BE2F285EAF00B0DB3C /* Assets.xcassets */; };
 		9A28A5D82F285EAF00B0DB3C /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = 9A28A5BF2F285EAF00B0DB3C /* README.md */; };
+		9A28A6542F2998CE00B0DB3C /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = 9A28A6532F2998CE00B0DB3C /* GRDB */; };
+		9A28A6652F299CE400B0DB3C /* GoogleSignIn in Frameworks */ = {isa = PBXBuildFile; productRef = 9A28A6642F299CE400B0DB3C /* GoogleSignIn */; };
+		9A28A6672F299CE400B0DB3C /* GoogleSignInSwift in Frameworks */ = {isa = PBXBuildFile; productRef = 9A28A6662F299CE400B0DB3C /* GoogleSignInSwift */; };
+		9A28A67C2F29B29300B0DB3C /* GoogleService-Info.plist in Resources */ = {isa = PBXBuildFile; fileRef = 9A28A6792F29AE1000B0DB3C /* GoogleService-Info.plist */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		9A28A4822F27AD0F00B0DB3C /* OnDue.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OnDue.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		9A28A5BE2F285EAF00B0DB3C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		9A28A5BF2F285EAF00B0DB3C /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
+		9A28A6702F29A3C300B0DB3C /* .gitignore */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitignore; sourceTree = "<group>"; };
+		9A28A6782F29ADC600B0DB3C /* OnDue-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "OnDue-Info.plist"; sourceTree = "<group>"; };
+		9A28A6792F29AE1000B0DB3C /* GoogleService-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "GoogleService-Info.plist"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -24,7 +31,8 @@
 				Database/Database.swift,
 				Database/FTS.swift,
 				Database/Migrations.swift,
-				Repositories/EmailSnippetRepository.swift,
+				Repositories/MailboxAccountRepository.swift,
+				Repositories/MessageRepository.swift,
 				Repositories/ObligationRepository.swift,
 			);
 			target = 9A28A4812F27AD0F00B0DB3C /* OnDue */;
@@ -39,16 +47,6 @@
 			);
 			target = 9A28A4812F27AD0F00B0DB3C /* OnDue */;
 		};
-		9A28A6162F28671200B0DB3C /* Exceptions for "Models" folder in "OnDue" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				EmailSnippet.swift,
-				EvidenceLine.swift,
-				Obligation.swift,
-				SenderRule.swift,
-			);
-			target = 9A28A4812F27AD0F00B0DB3C /* OnDue */;
-		};
 		9A28A6172F28671200B0DB3C /* Exceptions for "Services" folder in "OnDue" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
@@ -56,6 +54,7 @@
 				Extraction/ObligationExtractor.swift,
 				Gmail/GmailAuthService.swift,
 				Gmail/GmailClient.swift,
+				Gmail/GmailConfiguration.swift,
 				Gmail/GmailSyncService.swift,
 			);
 			target = 9A28A4812F27AD0F00B0DB3C /* OnDue */;
@@ -65,6 +64,17 @@
 			membershipExceptions = (
 				DateParsing.swift,
 				Logger.swift,
+			);
+			target = 9A28A4812F27AD0F00B0DB3C /* OnDue */;
+		};
+		9A28A6612F2999CC00B0DB3C /* Exceptions for "Models" folder in "OnDue" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Feedback.swift,
+				MailboxAccount.swift,
+				Message.swift,
+				Obligation.swift,
+				Suppression.swift,
 			);
 			target = 9A28A4812F27AD0F00B0DB3C /* OnDue */;
 		};
@@ -95,7 +105,7 @@
 		9A28A5F02F28671200B0DB3C /* Models */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
-				9A28A6162F28671200B0DB3C /* Exceptions for "Models" folder in "OnDue" target */,
+				9A28A6612F2999CC00B0DB3C /* Exceptions for "Models" folder in "OnDue" target */,
 			);
 			path = Models;
 			sourceTree = "<group>";
@@ -123,6 +133,9 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				9A28A6672F299CE400B0DB3C /* GoogleSignInSwift in Frameworks */,
+				9A28A6542F2998CE00B0DB3C /* GRDB in Frameworks */,
+				9A28A6652F299CE400B0DB3C /* GoogleSignIn in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -132,6 +145,7 @@
 		9A28A4792F27AD0F00B0DB3C = {
 			isa = PBXGroup;
 			children = (
+				9A28A6782F29ADC600B0DB3C /* OnDue-Info.plist */,
 				9A28A4832F27AD0F00B0DB3C /* Products */,
 				9A28A5DC2F28671200B0DB3C /* App */,
 				9A28A5E42F28671200B0DB3C /* Data */,
@@ -141,6 +155,8 @@
 				9A28A5FC2F28671200B0DB3C /* Utilities */,
 				9A28A5BE2F285EAF00B0DB3C /* Assets.xcassets */,
 				9A28A5BF2F285EAF00B0DB3C /* README.md */,
+				9A28A6702F29A3C300B0DB3C /* .gitignore */,
+				9A28A6792F29AE1000B0DB3C /* GoogleService-Info.plist */,
 			);
 			sourceTree = "<group>";
 		};
@@ -172,6 +188,9 @@
 			);
 			name = OnDue;
 			packageProductDependencies = (
+				9A28A6532F2998CE00B0DB3C /* GRDB */,
+				9A28A6642F299CE400B0DB3C /* GoogleSignIn */,
+				9A28A6662F299CE400B0DB3C /* GoogleSignInSwift */,
 			);
 			productName = OnDue;
 			productReference = 9A28A4822F27AD0F00B0DB3C /* OnDue.app */;
@@ -201,6 +220,10 @@
 			);
 			mainGroup = 9A28A4792F27AD0F00B0DB3C;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				9A28A6522F2998CE00B0DB3C /* XCRemoteSwiftPackageReference "GRDB" */,
+				9A28A6632F299CE400B0DB3C /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 9A28A4832F27AD0F00B0DB3C /* Products */;
 			projectDirPath = "";
@@ -218,6 +241,7 @@
 			files = (
 				9A28A5D72F285EAF00B0DB3C /* Assets.xcassets in Resources */,
 				9A28A5D82F285EAF00B0DB3C /* README.md in Resources */,
+				9A28A67C2F29B29300B0DB3C /* GoogleService-Info.plist in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -362,6 +386,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "OnDue-Info.plist";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -393,6 +418,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "OnDue-Info.plist";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -437,6 +463,43 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		9A28A6522F2998CE00B0DB3C /* XCRemoteSwiftPackageReference "GRDB" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/groue/GRDB.swift";
+			requirement = {
+				branch = master;
+				kind = branch;
+			};
+		};
+		9A28A6632F299CE400B0DB3C /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/google/GoogleSignIn-iOS";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 9.1.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		9A28A6532F2998CE00B0DB3C /* GRDB */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 9A28A6522F2998CE00B0DB3C /* XCRemoteSwiftPackageReference "GRDB" */;
+			productName = GRDB;
+		};
+		9A28A6642F299CE400B0DB3C /* GoogleSignIn */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 9A28A6632F299CE400B0DB3C /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */;
+			productName = GoogleSignIn;
+		};
+		9A28A6662F299CE400B0DB3C /* GoogleSignInSwift */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 9A28A6632F299CE400B0DB3C /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */;
+			productName = GoogleSignInSwift;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 9A28A47A2F27AD0F00B0DB3C /* Project object */;
 }

@@ -1,0 +1,38 @@
+# macOS
+.DS_Store
+
+# Xcode user data
+**/xcuserdata/
+*.xcuserdatad/
+*.xccheckout
+*.xcscmblueprint
+
+# Build products
+build/
+DerivedData/
+
+# SwiftPM
+.swiftpm/
+.build/
+
+# CocoaPods (if used)
+Pods/
+
+# Carthage (if used)
+Carthage/Build/
+
+# Fastlane (if used)
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/
+fastlane/test_output/
+
+# App specific config (do not commit real secrets)
+Info.dev.plist
+GoogleService-Info.plist
+
+# User-specific environment files
+*.local
+.env
+dev.info.plist
+

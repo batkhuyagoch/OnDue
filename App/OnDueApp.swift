@@ -1,4 +1,5 @@
 import SwiftUI
+import GoogleSignIn
 
 @main
 struct OnDueApp: App {
@@ -8,6 +9,14 @@ struct OnDueApp: App {
         WindowGroup {
             RootView()
                 .environmentObject(environmentStore)
+                .onOpenURL { url in
+                    // Handle Google Sign-In callback
+                    GIDSignIn.sharedInstance.handle(url)
+                }
+                .task {
+                    // Try to restore previous sign-in
+                    _ = try? await GmailAuthService.shared.restorePreviousSignIn()
+                }
         }
     }
 }

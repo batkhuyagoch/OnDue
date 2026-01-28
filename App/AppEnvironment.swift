@@ -6,18 +6,18 @@ struct AppEnvironment {
     let gmailSyncService: GmailSyncServicing
     let obligationExtractor: ObligationExtracting
     let obligationRepository: ObligationRepositorying
-    let emailSnippetRepository: EmailSnippetRepositorying
-    let backgroundRefreshService: BackgroundRefreshServicing
+    let messageRepository: MessageRepositorying
+    let mailboxAccountRepository: MailboxAccountRepositorying
 
     static func live() -> AppEnvironment {
-        let database = Database()
+        let database = Database.shared
         return AppEnvironment(
-            gmailAuthService: GmailAuthService(),
+            gmailAuthService: GmailAuthService.shared,
             gmailSyncService: GmailSyncService(database: database),
             obligationExtractor: ObligationExtractor(),
             obligationRepository: ObligationRepository(database: database),
-            emailSnippetRepository: EmailSnippetRepository(database: database),
-            backgroundRefreshService: BackgroundRefreshService()
+            messageRepository: MessageRepository(database: database),
+            mailboxAccountRepository: MailboxAccountRepository(database: database)
         )
     }
 }
