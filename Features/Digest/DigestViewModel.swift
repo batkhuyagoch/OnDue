@@ -26,15 +26,7 @@ final class DigestViewModel: ObservableObject {
         error = nil
         
         do {
-            var obligations = try await environment.obligationRepository.fetchTopDigest(limit: 10)
-            
-            #if DEBUG
-            // Use mock data if database is empty (for development)
-            if obligations.isEmpty {
-                obligations = ObligationRepository.mockObligations()
-            }
-            #endif
-            
+            let obligations = try await environment.obligationRepository.fetchTopDigest(limit: 10)
             sections = Self.buildSections(from: obligations)
         } catch {
             self.error = error

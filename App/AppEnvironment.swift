@@ -4,6 +4,8 @@ import Combine
 struct AppEnvironment {
     let gmailAuthService: GmailAuthServicing
     let gmailSyncService: GmailSyncServicing
+    let gmailSyncCoordinator: GmailSyncCoordinating
+    let syncPolicyStore: SyncPolicyStore
     let obligationExtractor: ObligationExtracting
     let obligationRepository: ObligationRepositorying
     let messageRepository: MessageRepositorying
@@ -11,13 +13,26 @@ struct AppEnvironment {
 
     static func live() -> AppEnvironment {
         let database = Database.shared
+        let gmailSyncService = GmailSyncService(database: database)
+        let messageRepository = MessageRepository(database: database)
+        let obligationRepository = ObligationRepository(database: database)
+        let mailboxAccountRepository = MailboxAccountRepository(database: database)
+        let syncPolicyStore = SyncPolicyStore()
         return AppEnvironment(
             gmailAuthService: GmailAuthService.shared,
-            gmailSyncService: GmailSyncService(database: database),
+            gmailSyncService: gmailSyncService,
+            gmailSyncCoordinator: GmailSyncCoordinator(
+                gmailSyncService: gmailSyncService,
+                messageRepository: messageRepository,
+                obligationExtractor: ObligationExtractor(),
+                obligationRepository: obligationRepository,
+                mailboxAccountRepository: mailboxAccountRepository
+            ),
+            syncPolicyStore: syncPolicyStore,
             obligationExtractor: ObligationExtractor(),
-            obligationRepository: ObligationRepository(database: database),
-            messageRepository: MessageRepository(database: database),
-            mailboxAccountRepository: MailboxAccountRepository(database: database)
+            obligationRepository: obligationRepository,
+            messageRepository: messageRepository,
+            mailboxAccountRepository: mailboxAccountRepository
         )
     }
 }

@@ -3,6 +3,7 @@ import SwiftUI
 struct ConnectGmailView: View {
     @EnvironmentObject private var environment: AppEnvironmentStore
     @StateObject private var viewModel = ConnectGmailViewModel()
+    @State private var showingPolicy = false
 
     var body: some View {
         NavigationView {
@@ -17,8 +18,14 @@ struct ConnectGmailView: View {
             }
             .padding()
             .navigationTitle("Connect")
+            .sheet(isPresented: $showingPolicy) {
+                SyncPolicyView()
+                    .environmentObject(environment)
+            }
             .onAppear {
-                viewModel.checkConnection(using: environment.value)
+                Task {
+                    await viewModel.checkConnection(using: environment.value)
+                }
             }
         }
     }
@@ -91,6 +98,70 @@ struct ConnectGmailView: View {
                     .foregroundStyle(.secondary)
             }
             
+            if let report = viewModel.lastSyncReport {
+                VStack(spacing: 4) {
+                    Text("Last sync stats")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                    Text("Searched: \(report.messageIDsCount) • Saved: \(report.messagesSavedCount) • Obligations: \(report.obligationsCount)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if report.deletedOldMessagesCount > 0 {
+                        Text("Deleted old local messages: \(report.deletedOldMessagesCount)")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .multilineTextAlignment(.center)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("Sync log")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                    Spacer()
+                    Button("Test log") {
+                        viewModel.addTestLog()
+                    }
+                    .font(.caption)
+                }
+                Text("Log count: \(viewModel.syncLogs.count)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                if viewModel.syncLogs.isEmpty {
+                    Text("No logs yet.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(viewModel.syncLogs.suffix(20)) { entry in
+                                Text("• \(entry.timestamp.formatted(date: .omitted, time: .standard)) — \(entry.message)")
+                                    .font(.system(size: 11, weight: .regular, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 140)
+                }
+            }
+            
+            Button {
+                showingPolicy = true
+            } label: {
+                HStack {
+                    Image(systemName: "slider.horizontal.3")
+                    Text("Sync policy")
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            
+            Toggle("Force full sync", isOn: $viewModel.forceFullSync)
+                .font(.footnote)
+            
             VStack(spacing: 12) {
                 Button {
                     Task {
@@ -110,7 +181,47 @@ struct ConnectGmailView: View {
                     .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(viewModel.isSyncing)
+                .disabled(viewModel.isSyncing || viewModel.isBackfilling)
+                
+                Button(role: .destructive) {
+                    Task {
+                        await viewModel.resetLocalData(using: environment.value)
+                    }
+                } label: {
+                    HStack {
+                        if viewModel.isResetting {
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                                .scaleEffect(0.8)
+                        } else {
+                            Image(systemName: "trash")
+                        }
+                        Text("Reset local cache")
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .disabled(viewModel.isSyncing || viewModel.isBackfilling || viewModel.isResetting)
+
+                Button {
+                    Task {
+                        await viewModel.backfillLast12Months(using: environment.value)
+                    }
+                } label: {
+                    HStack {
+                        if viewModel.isBackfilling {
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                                .scaleEffect(0.8)
+                        } else {
+                            Image(systemName: "clock.arrow.circlepath")
+                        }
+                        Text("Backfill 12 Months")
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .disabled(viewModel.isSyncing || viewModel.isBackfilling)
                 
                 Button(role: .destructive) {
                     viewModel.disconnect(using: environment.value)
@@ -124,6 +235,82 @@ struct ConnectGmailView: View {
                 .buttonStyle(.bordered)
             }
             .controlSize(.large)
+        }
+    }
+}
+
+struct SyncPolicyView: View {
+    @EnvironmentObject private var environment: AppEnvironmentStore
+    @Environment(\.dismiss) private var dismiss
+    
+    private var policy: SyncPolicyStore {
+        environment.value.syncPolicyStore
+    }
+    
+    private var defaultRangeBinding: Binding<SyncRange> {
+        Binding(
+            get: { policy.defaultSyncRange },
+            set: { policy.defaultSyncRange = $0 }
+        )
+    }
+    
+    private var backgroundEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { policy.backgroundSyncEnabled },
+            set: { policy.backgroundSyncEnabled = $0 }
+        )
+    }
+    
+    private var backgroundIntervalBinding: Binding<Int> {
+        Binding(
+            get: { policy.backgroundIntervalHours },
+            set: { policy.backgroundIntervalHours = $0 }
+        )
+    }
+    
+    private var maxMessagesBinding: Binding<Int> {
+        Binding(
+            get: { policy.maxMessagesPerSlice },
+            set: { policy.maxMessagesPerSlice = $0 }
+        )
+    }
+
+    var body: some View {
+        NavigationView {
+            Form {
+                Section(header: Text("Default Sync Range")) {
+                    Picker("Range", selection: defaultRangeBinding) {
+                        ForEach(SyncRange.allCases) { range in
+                            Text(range.title).tag(range)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                }
+
+                Section(header: Text("Background Sync")) {
+                    Toggle("Enable background sync", isOn: backgroundEnabledBinding)
+                    Picker("Interval", selection: backgroundIntervalBinding) {
+                        ForEach([2, 6, 12, 24], id: \.self) { hours in
+                            Text("Every \(hours)h").tag(hours)
+                        }
+                    }
+                }
+
+                Section(header: Text("Limits")) {
+                    Stepper(value: maxMessagesBinding, in: 1000...200_000, step: 1000) {
+                        Text("Max messages per slice: \(policy.maxMessagesPerSlice)")
+                    }
+                    Text("Higher values pull more mail but may be slower.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("Sync Policy")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
         }
     }
 }
