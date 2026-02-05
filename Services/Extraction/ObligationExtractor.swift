@@ -1,129 +1,114 @@
 import Foundation
+@preconcurrency import Combine
 
 protocol ObligationExtracting: Sendable {
-    func extract(from messages: [MessageRecord], mailboxAccountId: String) -> [ObligationRecord]
+    func extract(from messages: [MessageRecord], mailboxAccountId: String) async throws -> [ObligationRecord]
+    func assess(message: MessageRecord, mailboxAccountId: String) async throws -> RuleAssessment
+    func makeObligation(from assessment: RuleAssessment, message: MessageRecord, mailboxAccountId: String, messagePk: Int64) -> ObligationRecord
 }
 
 final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
-    
-    func extract(from messages: [MessageRecord], mailboxAccountId: String) -> [ObligationRecord] {
-        // TODO: Implement high-precision rules:
-        // - explicit dates ("by Friday", "due March 15")
-        // - request phrases ("please send", "need you to", "can you")
-        // - appointments ("scheduled for", "meeting at")
-        // - payment terms ("payment due", "invoice")
-        
-        var obligations: [ObligationRecord] = []
-        
+    private let parser = EmailParser()
+    private let ruleEngine: RuleEngine
+    private let ruleWeightRepository: RuleWeightRepositorying
+    private let candidateScoreRepository: CandidateScoreRepositorying
+
+    init(
+        preferences: FilterPreferencesStoring,
+        ruleWeightRepository: RuleWeightRepositorying,
+        candidateScoreRepository: CandidateScoreRepositorying
+    ) {
+        self.ruleEngine = RuleEngine(preferences: preferences)
+        self.ruleWeightRepository = ruleWeightRepository
+        self.candidateScoreRepository = candidateScoreRepository
+    }
+
+    func extract(from messages: [MessageRecord], mailboxAccountId: String) async throws -> [ObligationRecord] {
+        let multipliers = try await ruleWeightRepository.fetchMultipliers(mailboxAccountId: mailboxAccountId)
+        var acceptedByThread: [String: (assessment: RuleAssessment, message: MessageRecord, messagePk: Int64)] = [:]
+
         for message in messages {
             guard let pk = message.pk else { continue }
+            let parsedEmail = parser.parse(message: message)
+            let assessment = ruleEngine.assess(email: parsedEmail, weightMultipliers: multipliers)
+            let threadKey = message.threadId ?? message.providerMessageId
 
-            // High-precision suppression to avoid promo/marketing noise.
-            if isSuppressed(message: message) { continue }
-            
-            // Simple placeholder extraction - detect obvious deadline keywords
-            let text = "\(message.subject) \(message.snippet ?? "")"
-            
-            if let extracted = extractObligation(from: text, message: message, mailboxAccountId: mailboxAccountId, messagePk: pk) {
-                obligations.append(extracted)
+            if ruleEngine.isAccepted(assessment) {
+                if let existing = acceptedByThread[threadKey] {
+                    if isPreferred(assessment, over: existing.assessment) {
+                        acceptedByThread[threadKey] = (assessment, message, pk)
+                    }
+                } else {
+                    acceptedByThread[threadKey] = (assessment, message, pk)
+                }
+                try? await candidateScoreRepository.delete(messagePk: pk)
+            } else if ruleEngine.isBorderline(assessment) {
+                let record = CandidateScoreRecord(
+                    messagePk: pk,
+                    score: assessment.score,
+                    matchedRuleIds: assessment.matchedRuleIds.joined(separator: ","),
+                    reasons: assessment.matchedReasons.joined(separator: " | ")
+                )
+                try await candidateScoreRepository.saveBorderline(record)
+            } else {
+                try? await candidateScoreRepository.delete(messagePk: pk)
             }
         }
-        
-        return obligations
+
+        return acceptedByThread.values.map { entry in
+            makeObligation(
+                from: entry.assessment,
+                message: entry.message,
+                mailboxAccountId: mailboxAccountId,
+                messagePk: entry.messagePk
+            )
+        }
     }
-    
-    private func extractObligation(
-        from text: String,
+
+    func assess(message: MessageRecord, mailboxAccountId: String) async throws -> RuleAssessment {
+        let multipliers = try await ruleWeightRepository.fetchMultipliers(mailboxAccountId: mailboxAccountId)
+        let parsedEmail = parser.parse(message: message)
+        return ruleEngine.assess(email: parsedEmail, weightMultipliers: multipliers)
+    }
+
+    func makeObligation(
+        from assessment: RuleAssessment,
         message: MessageRecord,
         mailboxAccountId: String,
         messagePk: Int64
-    ) -> ObligationRecord? {
-        let lowercased = text.lowercased()
-        
-        // Balanced rules: allow softer requests but keep promo suppression.
-        let strongDeadlinePatterns = [
-            "due by", "due on", "due date", "deadline", "expires on", "by end of day", "by eod",
-            "submit by", "respond by", "reply by", "complete by", "deliver by", "payment due"
-        ]
-        let strongRequestPatterns = [
-            "please send", "please review", "please sign", "please complete", "please confirm",
-            "need you to", "can you", "could you", "would you", "action required", "your action is required",
-            "required action", "urgent response"
-        ]
-        let softRequestPatterns = [
-            "please take a look", "please advise", "please follow up", "can you take a look",
-            "could you take a look", "would you mind", "would you be able", "let me know",
-            "kindly review", "kindly confirm", "kindly send", "when you have a chance"
-        ]
-        let appointmentPatterns = [
-            "meeting scheduled", "calendar invite", "appointment", "call scheduled", "call at",
-            "meeting at", "interview scheduled", "session at", "sync", "invite"
-        ]
-        
-        var category: ObligationCategory?
-        var risk: ObligationRisk = .medium
-        
-        // Require a strong signal + (deadline or request). Appointments are only accepted
-        // if the subject/snippet has explicit scheduling language.
-        if strongDeadlinePatterns.contains(where: { lowercased.contains($0) }) {
-            category = .deadline
-            risk = .high
-        } else if strongRequestPatterns.contains(where: { lowercased.contains($0) }) {
-            category = .request
-        } else if softRequestPatterns.contains(where: { lowercased.contains($0) }) {
-            category = .request
-            risk = .medium
-        } else if appointmentPatterns.contains(where: { lowercased.contains($0) }) {
-            category = .appointment
-        }
-        
-        guard let detectedCategory = category else { return nil }
-        
-        // Generate a unique key for deduplication
-        let obligationKey = "\(message.providerMessageId)_\(detectedCategory.rawValue)"
-        
+    ) -> ObligationRecord {
+        let obligationKey = "\(message.providerMessageId)_\(assessment.category.rawValue)"
         return ObligationRecord(
             mailboxAccountId: mailboxAccountId,
             messagePk: messagePk,
-            category: detectedCategory,
+            category: assessment.category,
             title: message.subject,
-            deadlineAt: nil, // TODO: Parse actual dates
-            risk: risk,
+            deadlineAt: assessment.deadline,
+            risk: assessment.risk,
             whoOwes: .me,
-            confidence: 0.7,
-            evidenceQuote: message.snippet ?? message.subject,
-            obligationKey: obligationKey
+            confidence: assessment.confidence,
+            evidenceQuote: assessment.evidenceQuote,
+            obligationKey: obligationKey,
+            score: assessment.score,
+            matchedRuleIds: assessment.matchedRuleIds.joined(separator: ","),
+            matchedSignalTypes: assessment.matchedSignalTypes.map { $0.rawValue }.joined(separator: ","),
+            matchedReasons: assessment.matchedReasons.joined(separator: " | ")
         )
     }
 
-    private func isSuppressed(message: MessageRecord) -> Bool {
-        let subject = message.subject.lowercased()
-        let snippet = (message.snippet ?? "").lowercased()
-        let fromEmail = message.fromEmail.lowercased()
-        let labels = (message.labelIds ?? "").lowercased()
-        let text = "\(subject) \(snippet)"
-        
-        // Gmail labels
-        let labelBlocklist = ["category_promotions", "category_social", "category_updates", "category_forums"]
-        if labelBlocklist.contains(where: { labels.contains($0) }) {
+    private func isPreferred(_ candidate: RuleAssessment, over existing: RuleAssessment) -> Bool {
+        if candidate.confidence != existing.confidence {
+            return candidate.confidence > existing.confidence
+        }
+        if candidate.score != existing.score {
+            return candidate.score > existing.score
+        }
+        if let candidateDeadline = candidate.deadline, let existingDeadline = existing.deadline {
+            return candidateDeadline < existingDeadline
+        }
+        if candidate.deadline != nil && existing.deadline == nil {
             return true
         }
-        
-        // Sender suppression
-        if fromEmail.contains("noreply") || fromEmail.contains("no-reply") || fromEmail.contains("donotreply") {
-            return true
-        }
-        
-        // Promo/marketing suppression keywords
-        let promoKeywords = [
-            "unsubscribe", "sale", "deal", "offer", "promo", "promotion", "discount",
-            "newsletter", "marketing", "limited time", "new arrivals", "shop now",
-            "special offer", "save now", "percent off", "coupon", "free shipping"
-        ]
-        if promoKeywords.contains(where: { text.contains($0) }) {
-            return true
-        }
-        
         return false
     }
 }

@@ -178,5 +178,59 @@ enum Migrations {
             // Suppression index
             try db.create(index: "suppression_mailbox_type", on: "suppression", columns: ["mailboxAccountId", "type"])
         }
+
+        migrator.registerMigration("v2_obligation_scoring") { db in
+            try db.alter(table: "obligation") { t in
+                t.add(column: "score", .double).notNull().defaults(to: 0.0)
+                t.add(column: "matchedRuleIds", .text).notNull().defaults(to: "")
+            }
+        }
+
+        migrator.registerMigration("v3_obligation_signal_types") { db in
+            try db.alter(table: "obligation") { t in
+                t.add(column: "matchedSignalTypes", .text).notNull().defaults(to: "")
+            }
+        }
+
+        migrator.registerMigration("v4_obligation_reasons") { db in
+            try db.alter(table: "obligation") { t in
+                t.add(column: "matchedReasons", .text).notNull().defaults(to: "")
+            }
+        }
+
+        migrator.registerMigration("v5_message_body_and_attachments") { db in
+            try db.alter(table: "message") { t in
+                t.add(column: "bodyHtml", .text)
+                t.add(column: "attachmentTypes", .text)
+                t.add(column: "hasPdf", .boolean).notNull().defaults(to: false)
+                t.add(column: "hasCalendar", .boolean).notNull().defaults(to: false)
+            }
+        }
+
+        migrator.registerMigration("v6_rule_weight") { db in
+            try db.create(table: "rule_weight") { t in
+                t.column("id", .text).primaryKey()
+                t.column("mailboxAccountId", .text).notNull()
+                    .references("mailbox_account", column: "id", onDelete: .cascade)
+                t.column("ruleId", .text).notNull()
+                t.column("multiplier", .double).notNull().defaults(to: 1.0)
+                t.column("truePos", .integer).notNull().defaults(to: 0)
+                t.column("falsePos", .integer).notNull().defaults(to: 0)
+                t.column("updatedAt", .datetime).notNull()
+                t.uniqueKey(["mailboxAccountId", "ruleId"])
+            }
+        }
+
+        migrator.registerMigration("v7_feedback_rule_ids") { db in
+            try db.alter(table: "feedback") { t in
+                t.add(column: "matchedRuleIds", .text)
+            }
+        }
+
+        migrator.registerMigration("v8_candidate_score_rule_ids") { db in
+            try db.alter(table: "candidate_score") { t in
+                t.add(column: "matchedRuleIds", .text)
+            }
+        }
     }
 }

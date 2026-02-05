@@ -12,10 +12,20 @@ struct GmailMessageSummary: Hashable {
     let hasAttachments: Bool
 }
 
+struct GmailMessageBody: Hashable {
+    let messageID: String
+    let bodyText: String
+    let bodyHtml: String?
+    let attachmentTypes: [String]
+    let hasPdf: Bool
+    let hasCalendar: Bool
+}
+
 protocol GmailClienting: Sendable {
     func fetchMessages(daysBack: Int) async throws -> GmailMessageFetchResult
     func fetchMessages(startDate: Date, endDate: Date) async throws -> GmailMessageFetchResult
     func fetchMessages(messageIDs: [String]) async throws -> GmailMessageFetchResult
+    func fetchMessageBodies(messageIDs: [String]) async throws -> [GmailMessageBody]
     func fetchCurrentHistoryId() async throws -> String
     func fetchChangedMessageIDs(startHistoryId: String) async throws -> (messageIDs: [String], latestHistoryId: String?)
 }
@@ -112,6 +122,35 @@ final class GmailClient: GmailClienting, @unchecked Sendable {
             messageIDsCount: messageIDs.count,
             summaries: summaries.sorted { $0.receivedAt > $1.receivedAt }
         )
+    }
+
+    func fetchMessageBodies(messageIDs: [String]) async throws -> [GmailMessageBody] {
+        guard let accessToken = authService.accessToken else {
+            throw GmailClientError.notAuthenticated
+        }
+        guard !messageIDs.isEmpty else { return [] }
+        var bodies: [GmailMessageBody] = []
+
+        for batch in messageIDs.chunked(into: 10) {
+            let batchBodies = try await withThrowingTaskGroup(of: GmailMessageBody?.self) { group in
+                for messageID in batch {
+                    group.addTask {
+                        try await self.fetchMessageBodyDetails(messageID: messageID, accessToken: accessToken)
+                    }
+                }
+
+                var results: [GmailMessageBody] = []
+                for try await body in group {
+                    if let body {
+                        results.append(body)
+                    }
+                }
+                return results
+            }
+            bodies.append(contentsOf: batchBodies)
+        }
+
+        return bodies
     }
 
     func fetchCurrentHistoryId() async throws -> String {
@@ -398,6 +437,44 @@ final class GmailClient: GmailClienting, @unchecked Sendable {
         
         return parseMessage(json)
     }
+
+    private func fetchMessageBodyDetails(messageID: String, accessToken: String) async throws -> GmailMessageBody? {
+        var urlComponents = URLComponents(string: "\(baseURL)/users/me/messages/\(messageID)")!
+        urlComponents.queryItems = [
+            URLQueryItem(name: "format", value: "full")
+        ]
+
+        var request = URLRequest(url: urlComponents.url!)
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw GmailClientError.invalidResponse
+        }
+
+        if httpResponse.statusCode != 200 {
+            return nil
+        }
+
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+
+        guard let id = json["id"] as? String else { return nil }
+        let payload = json["payload"] as? [String: Any] ?? [:]
+        let extracted = extractBodyParts(from: payload)
+        guard let bodyText = extracted.bodyText, !bodyText.isEmpty else { return nil }
+
+        return GmailMessageBody(
+            messageID: id,
+            bodyText: bodyText,
+            bodyHtml: extracted.bodyHtml,
+            attachmentTypes: extracted.attachmentTypes,
+            hasPdf: extracted.hasPdf,
+            hasCalendar: extracted.hasCalendar
+        )
+    }
     
     private func parseMessage(_ json: [String: Any]) -> GmailMessageSummary? {
         guard let id = json["id"] as? String else { return nil }
@@ -474,6 +551,101 @@ final class GmailClient: GmailClienting, @unchecked Sendable {
         }
         
         return (email, name?.isEmpty == true ? nil : name)
+    }
+
+    private func extractBodyParts(from payload: [String: Any]) -> (bodyText: String?, bodyHtml: String?, attachmentTypes: [String], hasPdf: Bool, hasCalendar: Bool) {
+        let mimeType = payload["mimeType"] as? String
+        if let bodyText = decodeBody(payload["body"] as? [String: Any]),
+           mimeType == "text/plain" || mimeType == "text/html" {
+            let normalizedText = mimeType == "text/html" ? stripHTML(bodyText) : bodyText
+            let bodyHtml = mimeType == "text/html" ? bodyText : nil
+            return (normalizedText, bodyHtml, [], false, false)
+        }
+
+        let parts = payload["parts"] as? [[String: Any]] ?? []
+        var plainText: String?
+        var htmlText: String?
+        var attachmentTypes: [String] = []
+
+        for part in parts {
+            collectAttachmentTypes(from: part, into: &attachmentTypes)
+            let partType = part["mimeType"] as? String
+            if partType == "text/plain", let decoded = decodeBody(part["body"] as? [String: Any]) {
+                plainText = decoded
+                break
+            }
+        }
+
+        if plainText == nil {
+            for part in parts {
+                collectAttachmentTypes(from: part, into: &attachmentTypes)
+                let partType = part["mimeType"] as? String
+                if partType == "text/html", let decoded = decodeBody(part["body"] as? [String: Any]) {
+                    htmlText = decoded
+                    break
+                }
+                if let nestedParts = part["parts"] as? [[String: Any]] {
+                    for nested in nestedParts {
+                        collectAttachmentTypes(from: nested, into: &attachmentTypes)
+                        let nestedType = nested["mimeType"] as? String
+                        if nestedType == "text/plain", let decoded = decodeBody(nested["body"] as? [String: Any]) {
+                            plainText = decoded
+                            break
+                        }
+                        if nestedType == "text/html", let decoded = decodeBody(nested["body"] as? [String: Any]) {
+                            htmlText = decoded
+                        }
+                    }
+                }
+                if plainText != nil { break }
+            }
+        }
+
+        let normalizedTypes = attachmentTypes.map { $0.lowercased() }
+        let hasPdf = normalizedTypes.contains { $0 == "application/pdf" } || normalizedTypes.contains(where: { $0.contains("pdf") })
+        let hasCalendar = normalizedTypes.contains { $0 == "text/calendar" } || normalizedTypes.contains(where: { $0.contains("calendar") })
+
+        if let plainText, !plainText.isEmpty {
+            return (plainText, htmlText, attachmentTypes, hasPdf, hasCalendar)
+        }
+        if let htmlText, !htmlText.isEmpty {
+            return (stripHTML(htmlText), htmlText, attachmentTypes, hasPdf, hasCalendar)
+        }
+        return (nil, htmlText, attachmentTypes, hasPdf, hasCalendar)
+    }
+
+    private func collectAttachmentTypes(from part: [String: Any], into types: inout [String]) {
+        let filename = part["filename"] as? String ?? ""
+        guard !filename.isEmpty else { return }
+        if let mimeType = part["mimeType"] as? String {
+            types.append(mimeType)
+        }
+    }
+
+    private func decodeBody(_ body: [String: Any]?) -> String? {
+        guard let body,
+              let dataString = body["data"] as? String,
+              let decoded = decodeBase64URL(dataString) else {
+            return nil
+        }
+        return decoded
+    }
+
+    private func decodeBase64URL(_ input: String) -> String? {
+        var base64 = input.replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let padding = 4 - (base64.count % 4)
+        if padding < 4 {
+            base64 += String(repeating: "=", count: padding)
+        }
+        guard let data = Data(base64Encoded: base64) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private func stripHTML(_ html: String) -> String {
+        let withoutTags = html.replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
+        let normalized = withoutTags.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        return normalized.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 

@@ -13,7 +13,19 @@
 		9A28A6652F299CE400B0DB3C /* GoogleSignIn in Frameworks */ = {isa = PBXBuildFile; productRef = 9A28A6642F299CE400B0DB3C /* GoogleSignIn */; };
 		9A28A6672F299CE400B0DB3C /* GoogleSignInSwift in Frameworks */ = {isa = PBXBuildFile; productRef = 9A28A6662F299CE400B0DB3C /* GoogleSignInSwift */; };
 		9A28A67C2F29B29300B0DB3C /* GoogleService-Info.plist in Resources */ = {isa = PBXBuildFile; fileRef = 9A28A6792F29AE1000B0DB3C /* GoogleService-Info.plist */; };
+		9A28A7132F2A0001 /* RuleEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A28A7102F2A0001 /* RuleEngineTests.swift */; };
+		9A28A7142F2A0001 /* SampleEmails.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A28A7112F2A0001 /* SampleEmails.swift */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		9A28A71D2F2A0001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 9A28A47A2F27AD0F00B0DB3C /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 9A28A4812F27AD0F00B0DB3C;
+			remoteInfo = OnDue;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		9A28A4822F27AD0F00B0DB3C /* OnDue.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OnDue.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -22,6 +34,9 @@
 		9A28A6702F29A3C300B0DB3C /* .gitignore */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitignore; sourceTree = "<group>"; };
 		9A28A6782F29ADC600B0DB3C /* OnDue-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "OnDue-Info.plist"; sourceTree = "<group>"; };
 		9A28A6792F29AE1000B0DB3C /* GoogleService-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "GoogleService-Info.plist"; sourceTree = "<group>"; };
+		9A28A7102F2A0001 /* RuleEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuleEngineTests.swift; sourceTree = "<group>"; };
+		9A28A7112F2A0001 /* SampleEmails.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleEmails.swift; sourceTree = "<group>"; };
+		9A28A7122F2A0001 /* OnDueTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = OnDueTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -31,9 +46,12 @@
 				Database/Database.swift,
 				Database/FTS.swift,
 				Database/Migrations.swift,
+				Repositories/CandidateScoreRepository.swift,
+				Repositories/FeedbackRepository.swift,
 				Repositories/MailboxAccountRepository.swift,
 				Repositories/MessageRepository.swift,
 				Repositories/ObligationRepository.swift,
+				Repositories/RuleWeightRepository.swift,
 			);
 			target = 9A28A4812F27AD0F00B0DB3C /* OnDue */;
 		};
@@ -51,7 +69,10 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Background/BackgroundRefreshService.swift,
+				Extraction/CandidateSelector.swift,
+				Extraction/EmailParser.swift,
 				Extraction/ObligationExtractor.swift,
+				Extraction/RuleEngine.swift,
 				Gmail/GmailAuthService.swift,
 				Gmail/GmailClient.swift,
 				Gmail/GmailConfiguration.swift,
@@ -70,10 +91,12 @@
 		9A28A6612F2999CC00B0DB3C /* Exceptions for "Models" folder in "OnDue" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
+				CandidateScore.swift,
 				Feedback.swift,
 				MailboxAccount.swift,
 				Message.swift,
 				Obligation.swift,
+				RuleWeight.swift,
 				Suppression.swift,
 			);
 			target = 9A28A4812F27AD0F00B0DB3C /* OnDue */;
@@ -139,6 +162,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		9A28A7172F2A0001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -147,6 +177,7 @@
 			children = (
 				9A28A6782F29ADC600B0DB3C /* OnDue-Info.plist */,
 				9A28A4832F27AD0F00B0DB3C /* Products */,
+				9A28A7152F2A0001 /* OnDueTests */,
 				9A28A5DC2F28671200B0DB3C /* App */,
 				9A28A5E42F28671200B0DB3C /* Data */,
 				9A28A5EB2F28671200B0DB3C /* Features */,
@@ -164,8 +195,18 @@
 			isa = PBXGroup;
 			children = (
 				9A28A4822F27AD0F00B0DB3C /* OnDue.app */,
+				9A28A7122F2A0001 /* OnDueTests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		9A28A7152F2A0001 /* OnDueTests */ = {
+			isa = PBXGroup;
+			children = (
+				9A28A7102F2A0001 /* RuleEngineTests.swift */,
+				9A28A7112F2A0001 /* SampleEmails.swift */,
+			);
+			path = OnDueTests;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -196,6 +237,24 @@
 			productReference = 9A28A4822F27AD0F00B0DB3C /* OnDue.app */;
 			productType = "com.apple.product-type.application";
 		};
+		9A28A7192F2A0001 /* OnDueTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 9A28A71C2F2A0001 /* Build configuration list for PBXNativeTarget "OnDueTests" */;
+			buildPhases = (
+				9A28A7162F2A0001 /* Sources */,
+				9A28A7172F2A0001 /* Frameworks */,
+				9A28A7182F2A0001 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				9A28A71E2F2A0001 /* PBXTargetDependency */,
+			);
+			name = OnDueTests;
+			productName = OnDueTests;
+			productReference = 9A28A7122F2A0001 /* OnDueTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -207,6 +266,9 @@
 				LastUpgradeCheck = 2620;
 				TargetAttributes = {
 					9A28A4812F27AD0F00B0DB3C = {
+						CreatedOnToolsVersion = 26.2;
+					};
+					9A28A7192F2A0001 = {
 						CreatedOnToolsVersion = 26.2;
 					};
 				};
@@ -230,6 +292,7 @@
 			projectRoot = "";
 			targets = (
 				9A28A4812F27AD0F00B0DB3C /* OnDue */,
+				9A28A7192F2A0001 /* OnDueTests */,
 			);
 		};
 /* End PBXProject section */
@@ -245,6 +308,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		9A28A7182F2A0001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -255,7 +325,24 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		9A28A7162F2A0001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9A28A7132F2A0001 /* RuleEngineTests.swift in Sources */,
+				9A28A7142F2A0001 /* SampleEmails.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		9A28A71E2F2A0001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 9A28A4812F27AD0F00B0DB3C /* OnDue */;
+			targetProxy = 9A28A71D2F2A0001 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		9A28A48B2F27AD1100B0DB3C /* Debug */ = {
@@ -443,6 +530,55 @@
 			};
 			name = Release;
 		};
+		9A28A71A2F2A0001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CLANG_ENABLE_MODULES = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.hugo.OnDueTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/OnDue.app/OnDue";
+			};
+			name = Debug;
+		};
+		9A28A71B2F2A0001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CLANG_ENABLE_MODULES = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.hugo.OnDueTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/OnDue.app/OnDue";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -460,6 +596,15 @@
 			buildConfigurations = (
 				9A28A48E2F27AD1100B0DB3C /* Debug */,
 				9A28A48F2F27AD1100B0DB3C /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		9A28A71C2F2A0001 /* Build configuration list for PBXNativeTarget "OnDueTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				9A28A71A2F2A0001 /* Debug */,
+				9A28A71B2F2A0001 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

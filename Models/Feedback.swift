@@ -10,6 +10,7 @@ struct FeedbackRecord: Identifiable, Hashable, Codable, FetchableRecord, Persist
     var obligationId: String?
     var action: FeedbackAction
     var reason: String?
+    var matchedRuleIds: String?
     var createdAt: Date
     
     init(
@@ -19,6 +20,7 @@ struct FeedbackRecord: Identifiable, Hashable, Codable, FetchableRecord, Persist
         obligationId: String? = nil,
         action: FeedbackAction,
         reason: String? = nil,
+        matchedRuleIds: String? = nil,
         createdAt: Date = Date()
     ) {
         self.id = id
@@ -27,12 +29,14 @@ struct FeedbackRecord: Identifiable, Hashable, Codable, FetchableRecord, Persist
         self.obligationId = obligationId
         self.action = action
         self.reason = reason
+        self.matchedRuleIds = matchedRuleIds
         self.createdAt = createdAt
     }
     
     enum FeedbackAction: String, Codable, DatabaseValueConvertible {
         case accepted
         case dismissed
+        case snoozed
         case ignoreSender = "ignore_sender"
         case ignoreThread = "ignore_thread"
     }

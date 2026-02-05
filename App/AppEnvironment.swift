@@ -6,17 +6,28 @@ struct AppEnvironment {
     let gmailSyncService: GmailSyncServicing
     let gmailSyncCoordinator: GmailSyncCoordinating
     let syncPolicyStore: SyncPolicyStore
+    let filterPreferencesStore: FilterPreferencesStore
     let obligationExtractor: ObligationExtracting
     let obligationRepository: ObligationRepositorying
     let messageRepository: MessageRepositorying
     let mailboxAccountRepository: MailboxAccountRepositorying
+    let feedbackRepository: FeedbackRepositorying
+    let ruleWeightRepository: RuleWeightRepositorying
+    let candidateScoreRepository: CandidateScoreRepositorying
 
     static func live() -> AppEnvironment {
         let database = Database.shared
-        let gmailSyncService = GmailSyncService(database: database)
+        let filterPreferencesStore = FilterPreferencesStore()
+        let gmailSyncService = GmailSyncService(
+            database: database,
+            candidateSelector: CandidateSelector(preferences: filterPreferencesStore)
+        )
         let messageRepository = MessageRepository(database: database)
         let obligationRepository = ObligationRepository(database: database)
         let mailboxAccountRepository = MailboxAccountRepository(database: database)
+        let feedbackRepository = FeedbackRepository(database: database)
+        let ruleWeightRepository = RuleWeightRepository(database: database)
+        let candidateScoreRepository = CandidateScoreRepository(database: database)
         let syncPolicyStore = SyncPolicyStore()
         return AppEnvironment(
             gmailAuthService: GmailAuthService.shared,
@@ -24,15 +35,27 @@ struct AppEnvironment {
             gmailSyncCoordinator: GmailSyncCoordinator(
                 gmailSyncService: gmailSyncService,
                 messageRepository: messageRepository,
-                obligationExtractor: ObligationExtractor(),
+                obligationExtractor: ObligationExtractor(
+                    preferences: filterPreferencesStore,
+                    ruleWeightRepository: ruleWeightRepository,
+                    candidateScoreRepository: candidateScoreRepository
+                ),
                 obligationRepository: obligationRepository,
                 mailboxAccountRepository: mailboxAccountRepository
             ),
             syncPolicyStore: syncPolicyStore,
-            obligationExtractor: ObligationExtractor(),
+            filterPreferencesStore: filterPreferencesStore,
+            obligationExtractor: ObligationExtractor(
+                preferences: filterPreferencesStore,
+                ruleWeightRepository: ruleWeightRepository,
+                candidateScoreRepository: candidateScoreRepository
+            ),
             obligationRepository: obligationRepository,
             messageRepository: messageRepository,
-            mailboxAccountRepository: mailboxAccountRepository
+            mailboxAccountRepository: mailboxAccountRepository,
+            feedbackRepository: feedbackRepository,
+            ruleWeightRepository: ruleWeightRepository,
+            candidateScoreRepository: candidateScoreRepository
         )
     }
 }

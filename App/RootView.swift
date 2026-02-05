@@ -5,7 +5,7 @@ struct RootView: View {
         TabView {
             DigestView()
                 .tabItem {
-                    Label("Digest", systemImage: "list.bullet")
+                    Label("Important", systemImage: "checklist")
                 }
             ConnectGmailView()
                 .tabItem {

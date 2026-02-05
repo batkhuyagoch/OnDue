@@ -16,7 +16,11 @@ struct MessageRecord: Identifiable, Hashable, Codable, FetchableRecord, MutableP
     var subject: String
     var snippet: String?
     var bodyText: String?
+    var bodyHtml: String?
     var hasAttachments: Bool
+    var attachmentTypes: String?
+    var hasPdf: Bool
+    var hasCalendar: Bool
     var labelIds: String?
     var isDeleted: Bool
     var ingestedAt: Date
@@ -34,7 +38,11 @@ struct MessageRecord: Identifiable, Hashable, Codable, FetchableRecord, MutableP
         subject: String,
         snippet: String? = nil,
         bodyText: String? = nil,
+        bodyHtml: String? = nil,
         hasAttachments: Bool = false,
+        attachmentTypes: String? = nil,
+        hasPdf: Bool = false,
+        hasCalendar: Bool = false,
         labelIds: String? = nil,
         isDeleted: Bool = false,
         ingestedAt: Date = Date()
@@ -51,7 +59,11 @@ struct MessageRecord: Identifiable, Hashable, Codable, FetchableRecord, MutableP
         self.subject = subject
         self.snippet = snippet
         self.bodyText = bodyText
+        self.bodyHtml = bodyHtml
         self.hasAttachments = hasAttachments
+        self.attachmentTypes = attachmentTypes
+        self.hasPdf = hasPdf
+        self.hasCalendar = hasCalendar
         self.labelIds = labelIds
         self.isDeleted = isDeleted
         self.ingestedAt = ingestedAt

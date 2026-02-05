@@ -18,6 +18,10 @@ struct ObligationRecord: Identifiable, Hashable, Codable, FetchableRecord, Persi
     var confidence: Double
     var evidenceQuote: String
     var obligationKey: String
+    var score: Double
+    var matchedRuleIds: String
+    var matchedSignalTypes: String
+    var matchedReasons: String
     var snoozedUntil: Date?
     var resolvedAt: Date?
     var createdAt: Date
@@ -36,6 +40,10 @@ struct ObligationRecord: Identifiable, Hashable, Codable, FetchableRecord, Persi
         confidence: Double = 0.0,
         evidenceQuote: String,
         obligationKey: String,
+        score: Double = 0.0,
+        matchedRuleIds: String = "",
+        matchedSignalTypes: String = "",
+        matchedReasons: String = "",
         snoozedUntil: Date? = nil,
         resolvedAt: Date? = nil,
         createdAt: Date = Date(),
@@ -53,6 +61,10 @@ struct ObligationRecord: Identifiable, Hashable, Codable, FetchableRecord, Persi
         self.confidence = confidence
         self.evidenceQuote = evidenceQuote
         self.obligationKey = obligationKey
+        self.score = score
+        self.matchedRuleIds = matchedRuleIds
+        self.matchedSignalTypes = matchedSignalTypes
+        self.matchedReasons = matchedReasons
         self.snoozedUntil = snoozedUntil
         self.resolvedAt = resolvedAt
         self.createdAt = createdAt
@@ -75,6 +87,7 @@ enum ObligationCategory: String, Codable, CaseIterable, DatabaseValueConvertible
     case appointment
     case followUp
     case payment
+    case document
     case other
 }
 
@@ -94,6 +107,8 @@ enum WhoOwes: String, Codable, CaseIterable, DatabaseValueConvertible {
 
 struct ObligationItem: Identifiable, Hashable {
     let id: String
+    let mailboxAccountId: String
+    let messagePk: Int64
     let title: String
     let deadline: Date?
     let status: ObligationStatus
@@ -102,6 +117,9 @@ struct ObligationItem: Identifiable, Hashable {
     let whoOwes: WhoOwes
     let confidence: Double
     let evidenceQuote: String
+    let matchedRuleIds: [String]
+    let matchedSignalTypes: [String]
+    let matchedReasons: [String]
     let snoozedUntil: Date?
     
     /// Computed section for digest grouping
@@ -117,15 +135,32 @@ struct ObligationItem: Identifiable, Hashable {
                 return .waitingOn
             case .me, .unknown:
                 if let deadline = deadline {
-                    let daysUntil = Calendar.current.dateComponents([.day], from: Date(), to: deadline).day ?? 0
+                    let now = Date()
+                    let daysUntil = Calendar.current.dateComponents([.day], from: now, to: deadline).day ?? 0
+                    if daysUntil < 0 {
+                        return .overdue
+                    }
                     return daysUntil <= 7 ? .thisWeek : .upcoming
                 }
                 return .upcoming
             }
         }
     }
+
+    var urgencyRank: Int {
+        guard let deadline = deadline else { return 5 }
+        let now = Date()
+        let startOfToday = Calendar.current.startOfDay(for: now)
+        if deadline < startOfToday { return 0 }
+        if Calendar.current.isDateInToday(deadline) { return 1 }
+        let daysUntil = Calendar.current.dateComponents([.day], from: now, to: deadline).day ?? 0
+        if daysUntil <= 3 { return 2 }
+        if daysUntil <= 7 { return 3 }
+        return 4
+    }
     
     enum DigestSectionType {
+        case overdue
         case thisWeek
         case upcoming
         case waitingOn
@@ -139,6 +174,8 @@ struct ObligationItem: Identifiable, Hashable {
 extension ObligationItem {
     init(record: ObligationRecord) {
         self.id = record.id
+        self.mailboxAccountId = record.mailboxAccountId
+        self.messagePk = record.messagePk
         self.title = record.title
         self.deadline = record.deadlineAt
         self.status = record.status
@@ -147,6 +184,18 @@ extension ObligationItem {
         self.whoOwes = record.whoOwes
         self.confidence = record.confidence
         self.evidenceQuote = record.evidenceQuote
+        self.matchedRuleIds = record.matchedRuleIds
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        self.matchedSignalTypes = record.matchedSignalTypes
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        self.matchedReasons = record.matchedReasons
+            .split(separator: "|")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
         self.snoozedUntil = record.snoozedUntil
     }
 }

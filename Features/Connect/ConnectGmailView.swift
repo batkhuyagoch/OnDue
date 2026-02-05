@@ -114,39 +114,6 @@ struct ConnectGmailView: View {
                 }
                 .multilineTextAlignment(.center)
             }
-
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Text("Sync log")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                    Spacer()
-                    Button("Test log") {
-                        viewModel.addTestLog()
-                    }
-                    .font(.caption)
-                }
-                Text("Log count: \(viewModel.syncLogs.count)")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                if viewModel.syncLogs.isEmpty {
-                    Text("No logs yet.")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                } else {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 4) {
-                            ForEach(viewModel.syncLogs.suffix(20)) { entry in
-                                Text("• \(entry.timestamp.formatted(date: .omitted, time: .standard)) — \(entry.message)")
-                                    .font(.system(size: 11, weight: .regular, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .frame(maxHeight: 140)
-                }
-            }
             
             Button {
                 showingPolicy = true

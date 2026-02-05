@@ -17,54 +17,52 @@ final class GmailSyncService: GmailSyncServicing, @unchecked Sendable {
     private let database: Database
     private let client: GmailClienting
     private let messageRepository: MessageRepositorying
+    private let candidateSelector: CandidateSelecting
     
-    init(database: Database, client: GmailClienting = GmailClient()) {
+    init(
+        database: Database,
+        client: GmailClienting = GmailClient(),
+        candidateSelector: CandidateSelecting = CandidateSelector(preferences: FilterPreferencesStore())
+    ) {
         self.database = database
         self.client = client
         self.messageRepository = MessageRepository(database: database)
+        self.candidateSelector = candidateSelector
     }
     
     func initialSync(mailboxAccountId: String, daysBack: Int) async throws -> GmailSyncResult {
         let result = try await client.fetchMessages(daysBack: daysBack)
-        
-        let messages = result.summaries.map { summary in
-            MessageRecord(
+        let messages = result.summaries.map {
+            Self.makeMessageRecord(
+                from: $0,
                 mailboxAccountId: mailboxAccountId,
-                providerMessageId: summary.messageID,
-                threadId: summary.threadID,
-                internalDate: summary.receivedAt,
-                fromEmail: summary.sender,
-                fromName: summary.senderName,
-                subject: summary.subject,
-                snippet: summary.snippet,
-                hasAttachments: summary.hasAttachments,
-                labelIds: summary.labelIDs.joined(separator: ",")
+                bodyText: nil,
+                bodyHtml: nil,
+                attachmentTypes: nil,
+                hasPdf: false,
+                hasCalendar: false
             )
         }
-        
         try await messageRepository.save(messages)
+        try await hydrateBodiesIfNeeded(summaries: result.summaries, mailboxAccountId: mailboxAccountId)
         return GmailSyncResult(messageIDsCount: result.messageIDsCount, messagesSavedCount: messages.count)
     }
     
     func initialSync(mailboxAccountId: String, startDate: Date, endDate: Date) async throws -> GmailSyncResult {
         let result = try await client.fetchMessages(startDate: startDate, endDate: endDate)
-        
-        let messages = result.summaries.map { summary in
-            MessageRecord(
+        let messages = result.summaries.map {
+            Self.makeMessageRecord(
+                from: $0,
                 mailboxAccountId: mailboxAccountId,
-                providerMessageId: summary.messageID,
-                threadId: summary.threadID,
-                internalDate: summary.receivedAt,
-                fromEmail: summary.sender,
-                fromName: summary.senderName,
-                subject: summary.subject,
-                snippet: summary.snippet,
-                hasAttachments: summary.hasAttachments,
-                labelIds: summary.labelIDs.joined(separator: ",")
+                bodyText: nil,
+                bodyHtml: nil,
+                attachmentTypes: nil,
+                hasPdf: false,
+                hasCalendar: false
             )
         }
-        
         try await messageRepository.save(messages)
+        try await hydrateBodiesIfNeeded(summaries: result.summaries, mailboxAccountId: mailboxAccountId)
         return GmailSyncResult(messageIDsCount: result.messageIDsCount, messagesSavedCount: messages.count)
     }
     
@@ -72,22 +70,19 @@ final class GmailSyncService: GmailSyncServicing, @unchecked Sendable {
         let result = try await client.fetchChangedMessageIDs(startHistoryId: startHistoryId)
         let summariesResult = try await client.fetchMessages(messageIDs: result.messageIDs)
 
-        let messages = summariesResult.summaries.map { summary in
-            MessageRecord(
+        let messages = summariesResult.summaries.map {
+            Self.makeMessageRecord(
+                from: $0,
                 mailboxAccountId: mailboxAccountId,
-                providerMessageId: summary.messageID,
-                threadId: summary.threadID,
-                internalDate: summary.receivedAt,
-                fromEmail: summary.sender,
-                fromName: summary.senderName,
-                subject: summary.subject,
-                snippet: summary.snippet,
-                hasAttachments: summary.hasAttachments,
-                labelIds: summary.labelIDs.joined(separator: ",")
+                bodyText: nil,
+                bodyHtml: nil,
+                attachmentTypes: nil,
+                hasPdf: false,
+                hasCalendar: false
             )
         }
-
         try await messageRepository.save(messages)
+        try await hydrateBodiesIfNeeded(summaries: summariesResult.summaries, mailboxAccountId: mailboxAccountId)
         return GmailIncrementalSyncResult(
             messageIDsCount: result.messageIDs.count,
             messagesSavedCount: messages.count,
@@ -97,6 +92,68 @@ final class GmailSyncService: GmailSyncServicing, @unchecked Sendable {
 
     func fetchCurrentHistoryId() async throws -> String {
         try await client.fetchCurrentHistoryId()
+    }
+
+    private func hydrateBodiesIfNeeded(summaries: [GmailMessageSummary], mailboxAccountId: String) async throws {
+        let messages = summaries.map {
+            Self.makeMessageRecord(from: $0, mailboxAccountId: mailboxAccountId, bodyText: nil, bodyHtml: nil, attachmentTypes: nil, hasPdf: false, hasCalendar: false)
+        }
+        let candidates = messages.filter { candidateSelector.isCandidate($0) }
+        guard !candidates.isEmpty else { return }
+
+        let candidateIds = candidates.map { $0.providerMessageId }
+        let existingWithBody = try await messageRepository.fetchProviderMessageIdsWithBodyText(
+            mailboxAccountId: mailboxAccountId,
+            providerMessageIds: candidateIds
+        )
+        let idsToFetch = candidateIds.filter { !existingWithBody.contains($0) }
+        guard !idsToFetch.isEmpty else { return }
+
+        let bodies = try await client.fetchMessageBodies(messageIDs: idsToFetch)
+        guard !bodies.isEmpty else { return }
+
+        let summaryById = Dictionary(uniqueKeysWithValues: summaries.map { ($0.messageID, $0) })
+        let updated = bodies.compactMap { body -> MessageRecord? in
+            guard let summary = summaryById[body.messageID] else { return nil }
+            return Self.makeMessageRecord(
+                from: summary,
+                mailboxAccountId: mailboxAccountId,
+                bodyText: body.bodyText,
+                bodyHtml: body.bodyHtml,
+                attachmentTypes: body.attachmentTypes.joined(separator: ","),
+                hasPdf: body.hasPdf,
+                hasCalendar: body.hasCalendar
+            )
+        }
+        try await messageRepository.save(updated)
+    }
+
+    private static func makeMessageRecord(
+        from summary: GmailMessageSummary,
+        mailboxAccountId: String,
+        bodyText: String?,
+        bodyHtml: String?,
+        attachmentTypes: String?,
+        hasPdf: Bool,
+        hasCalendar: Bool
+    ) -> MessageRecord {
+        MessageRecord(
+            mailboxAccountId: mailboxAccountId,
+            providerMessageId: summary.messageID,
+            threadId: summary.threadID,
+            internalDate: summary.receivedAt,
+            fromEmail: summary.sender,
+            fromName: summary.senderName,
+            subject: summary.subject,
+            snippet: summary.snippet,
+            bodyText: bodyText,
+            bodyHtml: bodyHtml,
+            hasAttachments: summary.hasAttachments,
+            attachmentTypes: attachmentTypes,
+            hasPdf: hasPdf,
+            hasCalendar: hasCalendar,
+            labelIds: summary.labelIDs.joined(separator: ",")
+        )
     }
 }
 
@@ -172,7 +229,7 @@ final class GmailSyncCoordinator: GmailSyncCoordinating, @unchecked Sendable {
             mailboxAccountId: mailboxAccountId,
             daysBack: daysBack
         )
-        let obligations = obligationExtractor.extract(
+        let obligations = try await obligationExtractor.extract(
             from: recentMessages,
             mailboxAccountId: mailboxAccountId
         )
@@ -216,7 +273,7 @@ final class GmailSyncCoordinator: GmailSyncCoordinating, @unchecked Sendable {
             mailboxAccountId: mailboxAccountId,
             daysBack: daysBackForExtraction
         )
-        let obligations = obligationExtractor.extract(
+        let obligations = try await obligationExtractor.extract(
             from: recentMessages,
             mailboxAccountId: mailboxAccountId
         )
