@@ -1,11 +1,12 @@
 import Foundation
 
 protocol CandidateSelecting: Sendable {
-    func isCandidate(_ message: MessageRecord) -> Bool
+    func isCandidate(_ message: MessageRecord) async -> Bool
 }
 
 struct CandidateSelector: CandidateSelecting {
     private let preferences: FilterPreferencesStoring
+    private let suppressionRepository: SuppressionRepositorying?
     private let subjectKeywords = [
         "due", "invoice", "payment", "appointment", "renewal", "deadline", "statement", "policy"
     ]
@@ -39,11 +40,23 @@ struct CandidateSelector: CandidateSelecting {
         "shipped", "out for delivery", "delivered", "tracking", "shipment", "package"
     ]
 
-    init(preferences: FilterPreferencesStoring) {
+    init(preferences: FilterPreferencesStoring, suppressionRepository: SuppressionRepositorying? = nil) {
         self.preferences = preferences
+        self.suppressionRepository = suppressionRepository
     }
 
-    func isCandidate(_ message: MessageRecord) -> Bool {
+    func isCandidate(_ message: MessageRecord) async -> Bool {
+        if let suppressionRepository {
+            let blocked = (try? await suppressionRepository.isBlocked(
+                mailboxAccountId: message.mailboxAccountId,
+                sender: message.fromEmail,
+                domain: message.fromDomain
+            )) ?? false
+            if blocked {
+                return false
+            }
+        }
+
         let subject = message.subject.lowercased()
         let snippet = (message.snippet ?? "").lowercased()
         let senderDomain = message.fromDomain ?? ""

@@ -4,27 +4,42 @@ import Combine
 struct DigestView: View {
     @EnvironmentObject private var environment: AppEnvironmentStore
     @StateObject private var viewModel = DigestViewModel()
-    @State private var showingFilters = false
-    @State private var isOverdueExpanded = false
-    @State private var searchText = ""
 
     var body: some View {
-        NavigationView {
-            content
-                .navigationTitle("Important")
-        }
+        content
+            .navigationTitle("Obligations")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    NavigationLink {
+                        CoverageStatusView()
+                    } label: {
+                        Label("Coverage", systemImage: "checkmark.seal")
+                    }
+                }
+            }
         .task {
             await viewModel.loadDigest(using: environment.value)
         }
         .onReceive(environment.value.filterPreferencesStore.objectWillChange) { _ in
             Task { await viewModel.loadDigest(using: environment.value) }
         }
-        .sheet(isPresented: $showingFilters) {
-            FilterPreferencesSheet(preferences: environment.value.filterPreferencesStore)
-        }
-        .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .automatic))
-        .onChange(of: searchText) { newValue in
+        .searchable(text: $viewModel.searchQuery, placement: .navigationBarDrawer(displayMode: .automatic))
+        .onChange(of: viewModel.searchQuery) { _, newValue in
             viewModel.updateSearchQuery(newValue)
+        }
+        .onChange(of: viewModel.selectedLens) { _, _ in
+            Task { await viewModel.loadDigest(using: environment.value) }
+        }
+        .onChange(of: viewModel.selectedGrouping) { _, _ in
+            Task { await viewModel.loadDigest(using: environment.value) }
+        }
+        .alert("Error", isPresented: Binding(
+            get: { viewModel.error != nil },
+            set: { if !$0 { viewModel.clearError() } }
+        )) {
+            Button("OK") { viewModel.clearError() }
+        } message: {
+            Text(viewModel.error?.localizedDescription ?? "Something went wrong.")
         }
         .overlay(alignment: .bottom) {
             if let banner = viewModel.undoBanner {
@@ -54,8 +69,6 @@ struct DigestView: View {
         if viewModel.isLoading {
             ProgressView()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if viewModel.isEmpty {
-            emptyState
         } else {
             digestList
         }
@@ -72,116 +85,57 @@ struct DigestView: View {
     private var digestList: some View {
         List {
             Section {
-                filterRow
+                lensRow
+                groupingRow
             }
-            if !viewModel.borderlineItems.isEmpty {
-                Section("Review") {
-                    ForEach(viewModel.borderlineItems) { item in
-                        BorderlineRowView(
-                            item: item,
-                            onPromote: { Task { await viewModel.promote(item) } },
-                            onDismiss: { Task { await viewModel.dismissBorderline(item) } }
-                        )
-                    }
-                    if viewModel.hasMoreBorderline {
-                        HStack {
-                            Spacer()
-                            Button {
-                                Task { await viewModel.loadMoreBorderline() }
-                            } label: {
-                                if viewModel.isLoadingMoreBorderline {
-                                    ProgressView()
-                                } else {
-                                    Text("Load more")
-                                }
-                            }
-                            Spacer()
-                        }
-                    }
+            if viewModel.isEmpty {
+                Section {
+                    emptyState
                 }
             }
             ForEach(viewModel.sections) { section in
-                if section.kind == .overdue {
-                    Section {
-                        DisclosureGroup(isExpanded: $isOverdueExpanded) {
-                            ForEach(section.items) { item in
-                                NavigationLink {
-                                    ObligationDetailView(
-                                        obligation: item,
-                                        environment: environment.value,
-                                        onConfirm: { Task { await viewModel.confirm(item) } },
-                                        onDone: { Task { await viewModel.markDone(item) } },
-                                        onDismiss: { Task { await viewModel.dismiss(item) } },
-                                        onSnooze: { Task { await viewModel.snooze(item) } }
-                                    )
-                                } label: {
-                                    DigestRowView(obligation: item)
-                                }
-                                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                                    Button {
-                                        Task { await viewModel.markDone(item) }
-                                    } label: {
-                                        Label("Done", systemImage: "checkmark")
-                                    }
-                                    .tint(.green)
-                                    Button(role: .destructive) {
-                                        Task { await viewModel.dismiss(item) }
-                                    } label: {
-                                        Label("Dismiss", systemImage: "eye.slash")
-                                    }
-                                }
-                                .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                                    Button {
-                                        Task { await viewModel.confirm(item) }
-                                    } label: {
-                                        Label("Confirm", systemImage: "checkmark.seal")
-                                    }
-                                    .tint(.blue)
-                                }
-                            }
+                Section(header: Text(section.title)) {
+                    ForEach(section.items) { item in
+                        NavigationLink {
+                            ObligationDetailView(
+                                obligation: item.obligation,
+                                environment: environment.value,
+                                onConfirm: { Task { await viewModel.confirm(item.obligation) } },
+                                onDone: { Task { await viewModel.markDone(item.obligation) } },
+                                onDismiss: { Task { await viewModel.dismiss(item.obligation) } },
+                                onSnooze: { Task { await viewModel.snooze(item.obligation) } },
+                                onBlockSender: { Task { await viewModel.blockSender(item.obligation) } },
+                                onBlockDomain: { Task { await viewModel.blockDomain(item.obligation) } }
+                            )
                         } label: {
-                            DigestSectionHeader(kind: section.kind, count: section.items.count)
+                            DigestRowView(obligation: item.obligation, state: item.state)
                         }
-                    }
-                } else {
-                    Section {
-                        ForEach(section.items) { item in
-                            NavigationLink {
-                                ObligationDetailView(
-                                    obligation: item,
-                                    environment: environment.value,
-                                    onConfirm: { Task { await viewModel.confirm(item) } },
-                                    onDone: { Task { await viewModel.markDone(item) } },
-                                    onDismiss: { Task { await viewModel.dismiss(item) } },
-                                    onSnooze: { Task { await viewModel.snooze(item) } }
-                                )
+                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                            Button {
+                                Task { await viewModel.markDone(item.obligation) }
                             } label: {
-                                DigestRowView(obligation: item)
+                                Label("Done", systemImage: "checkmark")
                             }
-                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                                Button {
-                                    Task { await viewModel.markDone(item) }
-                                } label: {
-                                    Label("Done", systemImage: "checkmark")
-                                }
-                                .tint(.green)
-                                Button(role: .destructive) {
-                                    Task { await viewModel.dismiss(item) }
-                                } label: {
-                                    Label("Dismiss", systemImage: "eye.slash")
-                                }
+                            .tint(.green)
+                            Button(role: .destructive) {
+                                Task { await viewModel.dismiss(item.obligation) }
+                            } label: {
+                                Label("Dismiss", systemImage: "eye.slash")
                             }
-                            .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                                Button {
-                                    Task { await viewModel.confirm(item) }
-                                } label: {
-                                    Label("Confirm", systemImage: "checkmark.seal")
-                                }
-                                .tint(.blue)
+                            Button(role: .destructive) {
+                                Task { await viewModel.blockSender(item.obligation) }
+                            } label: {
+                                Label("Block Sender", systemImage: "hand.raised")
                             }
                         }
-                    } header: {
-                        DigestSectionHeader(kind: section.kind)
+                        .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                            Button {
+                                Task { await viewModel.confirm(item.obligation) }
+                            } label: {
+                                Label("Confirm", systemImage: "checkmark.seal")
+                            }
+                            .tint(.blue)
+                        }
                     }
                 }
             }
@@ -189,31 +143,22 @@ struct DigestView: View {
         .listStyle(.insetGrouped)
     }
 
-    private var filterRow: some View {
-        Button {
-            showingFilters = true
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "line.3.horizontal.decrease.circle")
-                Text("Filters")
-                Spacer()
-                Text(filterSummary)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+    private var lensRow: some View {
+        Picker("Lens", selection: $viewModel.selectedLens) {
+            ForEach(ObligationLens.allCases) { lens in
+                Text(lens.title).tag(lens)
             }
         }
+        .pickerStyle(.segmented)
     }
 
-    private var filterSummary: String {
-        let prefs = environment.value.filterPreferencesStore
-        let enabled = [
-            prefs.includeSecurityAlerts,
-            prefs.includeStatements,
-            prefs.includeMarketing,
-            prefs.includeNewsletters,
-            prefs.includeShipping
-        ].filter { $0 }.count
-        return enabled == 0 ? "Default" : "\(enabled) on"
+    private var groupingRow: some View {
+        Picker("Group", selection: $viewModel.selectedGrouping) {
+            ForEach(ObligationGrouping.allCases) { grouping in
+                Text(grouping.title).tag(grouping)
+            }
+        }
+        .pickerStyle(.menu)
     }
 }
 
@@ -252,106 +197,11 @@ private struct LearningToast: View {
     }
 }
 
-private struct BorderlineRowView: View {
-    let item: BorderlineItem
-    let onPromote: () -> Void
-    let onDismiss: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(item.subject)
-                .font(.subheadline.weight(.semibold))
-            if !item.snippet.isEmpty {
-                Text(item.snippet)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
-            Text("Thread")
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(
-                    Capsule()
-                        .fill(Color.secondary.opacity(0.12))
-                )
-            HStack(spacing: 12) {
-                Button("Promote") { onPromote() }
-                    .buttonStyle(.borderedProminent)
-                Button("Dismiss") { onDismiss() }
-                    .buttonStyle(.bordered)
-            }
-        }
-        .padding(.vertical, 4)
-    }
-}
-
-private struct FilterPreferencesSheet: View {
-    @ObservedObject var preferences: FilterPreferencesStore
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationView {
-            Form {
-                Section(header: Text("Include in Digest")) {
-                    Toggle("Security alerts", isOn: $preferences.includeSecurityAlerts)
-                    Toggle("Statements", isOn: $preferences.includeStatements)
-                    Toggle("Marketing", isOn: $preferences.includeMarketing)
-                    Toggle("Newsletters", isOn: $preferences.includeNewsletters)
-                    Toggle("Shipping", isOn: $preferences.includeShipping)
-                }
-                Section {
-                    Text("Defaults are off to keep only actionable obligations.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .navigationTitle("Filters")
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
-        }
-    }
-}
-
-// MARK: - Section Header
-
-private struct DigestSectionHeader: View {
-    let kind: DigestSection.Kind
-    var count: Int? = nil
-    
-    var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: kind.icon)
-                .foregroundStyle(color)
-            Text(kind.title)
-            if let count {
-                Text("(\(count))")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .font(.subheadline.weight(.semibold))
-        .textCase(nil)
-    }
-    
-    private var color: Color {
-        switch kind.color {
-        case .red: .red
-        case .orange: .orange
-        case .blue: .blue
-        case .purple: .purple
-        }
-    }
-}
-
 // MARK: - Row View
 
 private struct DigestRowView: View {
     let obligation: ObligationItem
+    let state: ObligationLifecycleState
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -367,6 +217,17 @@ private struct DigestRowView: View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Text(obligation.title)
                 .font(.subheadline.weight(.semibold))
+            if state == .needsReview {
+                Text("Needs Review")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(
+                        Capsule()
+                            .fill(Color.orange.opacity(0.12))
+                    )
+            }
             if isToday {
                 Text("Today")
                     .font(.caption2.weight(.semibold))
@@ -505,9 +366,13 @@ private struct ObligationDetailView: View {
     let onDone: () -> Void
     let onDismiss: () -> Void
     let onSnooze: () -> Void
+    let onBlockSender: () -> Void
+    let onBlockDomain: () -> Void
     @State private var message: MessageRecord?
     @State private var account: MailboxAccountRecord?
+    @State private var showFullMessage = false
     @Environment(\.openURL) private var openURL
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         List {
@@ -522,21 +387,34 @@ private struct ObligationDetailView: View {
                 }
                 LabeledContent("Category", value: obligation.category.rawValue.capitalized)
                 LabeledContent("Confidence", value: "\(Int(obligation.confidence * 100))%")
+                if obligation.repeatCount > 1 {
+                    LabeledContent("Seen", value: "\(obligation.repeatCount) times")
+                }
+                if let lastSeenAt = obligation.lastSeenAt {
+                    LabeledContent("Last seen", value: lastSeenAt.formatted(date: .abbreviated, time: .shortened))
+                }
             }
 
             if !obligation.matchedReasons.isEmpty {
-                Section("Why this matters") {
-                    ForEach(obligation.matchedReasons, id: \.self) { reason in
+                Section("Why we think this matters") {
+                    ForEach(Array(obligation.matchedReasons.enumerated()), id: \.offset) { _, reason in
                         Text(shortReasonLabel(for: reason))
                     }
                 }
             }
 
-            if let messageBody = messageBodyText {
-                Section("Message") {
+            if let messageBody = displayMessageText {
+                Section("Email") {
                     Text(messageBody)
                         .font(.callout)
                         .foregroundStyle(.secondary)
+                        .lineLimit(showFullMessage ? nil : 8)
+                        .textSelection(.enabled)
+                    if fullMessageText != nil {
+                        Button(showFullMessage ? "Show less" : "Show full message") {
+                            showFullMessage.toggle()
+                        }
+                    }
                 }
             }
 
@@ -552,6 +430,19 @@ private struct ObligationDetailView: View {
                 Section {
                     Button(openLabel) {
                         openURL(providerURL)
+                    }
+                }
+            }
+
+            if let sender = message?.fromEmail {
+                Section("Block") {
+                    Button("Block sender (\(sender))") {
+                        onBlockSender()
+                    }
+                    if let domain = message?.fromDomain, !domain.isEmpty {
+                        Button("Block domain (\(domain))") {
+                            onBlockDomain()
+                        }
                     }
                 }
             }
@@ -571,22 +462,27 @@ private struct ObligationDetailView: View {
 
     private var actionBar: some View {
         HStack(spacing: 12) {
-            Button("Confirm") { onConfirm() }
+            Button("Confirm") { performAction(onConfirm) }
                 .buttonStyle(.borderedProminent)
-            Button("Done") { onDone() }
+            Button("Done") { performAction(onDone) }
                 .buttonStyle(.bordered)
             Button(role: .destructive) {
-                onDismiss()
+                performAction(onDismiss)
             } label: {
                 Text("Dismiss")
             }
             .buttonStyle(.bordered)
-            Button("Snooze") { onSnooze() }
+            Button("Snooze") { performAction(onSnooze) }
                 .buttonStyle(.bordered)
         }
         .padding(.horizontal)
         .padding(.vertical, 8)
         .background(.ultraThinMaterial)
+    }
+
+    private func performAction(_ action: () -> Void) {
+        action()
+        dismiss()
     }
 
     private func shortReasonLabel(for reason: String) -> String {
@@ -616,13 +512,26 @@ private struct ObligationDetailView: View {
     }
 
     private var messageBodyText: String? {
-        if let body = message?.bodyText, !body.isEmpty {
-            return body
+        TextSanitizer.sanitizeMessage(
+            bodyText: message?.bodyText,
+            bodyHtml: message?.bodyHtml,
+            snippet: message?.snippet
+        )
+    }
+
+    private var fullMessageText: String? {
+        TextSanitizer.sanitizeMessagePreservingNewlines(
+            bodyText: message?.bodyText,
+            bodyHtml: message?.bodyHtml,
+            snippet: message?.snippet
+        )
+    }
+
+    private var displayMessageText: String? {
+        if showFullMessage {
+            return fullMessageText ?? messageBodyText
         }
-        if let snippet = message?.snippet, !snippet.isEmpty {
-            return snippet
-        }
-        return nil
+        return messageBodyText
     }
 
     private var providerMessageURL: URL? {

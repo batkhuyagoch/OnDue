@@ -24,6 +24,8 @@ struct ObligationRecord: Identifiable, Hashable, Codable, FetchableRecord, Persi
     var matchedReasons: String
     var snoozedUntil: Date?
     var resolvedAt: Date?
+    var repeatCount: Int
+    var lastSeenAt: Date?
     var createdAt: Date
     var updatedAt: Date
     
@@ -46,6 +48,8 @@ struct ObligationRecord: Identifiable, Hashable, Codable, FetchableRecord, Persi
         matchedReasons: String = "",
         snoozedUntil: Date? = nil,
         resolvedAt: Date? = nil,
+        repeatCount: Int = 1,
+        lastSeenAt: Date? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -67,6 +71,8 @@ struct ObligationRecord: Identifiable, Hashable, Codable, FetchableRecord, Persi
         self.matchedReasons = matchedReasons
         self.snoozedUntil = snoozedUntil
         self.resolvedAt = resolvedAt
+        self.repeatCount = repeatCount
+        self.lastSeenAt = lastSeenAt
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -121,6 +127,10 @@ struct ObligationItem: Identifiable, Hashable {
     let matchedSignalTypes: [String]
     let matchedReasons: [String]
     let snoozedUntil: Date?
+    let repeatCount: Int
+    let lastSeenAt: Date?
+    let createdAt: Date
+    let updatedAt: Date
     
     /// Computed section for digest grouping
     var digestSection: DigestSectionType {
@@ -197,5 +207,9 @@ extension ObligationItem {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
         self.snoozedUntil = record.snoozedUntil
+        self.repeatCount = record.repeatCount
+        self.lastSeenAt = record.lastSeenAt
+        self.createdAt = record.createdAt
+        self.updatedAt = record.updatedAt
     }
 }

@@ -232,5 +232,183 @@ enum Migrations {
                 t.add(column: "matchedRuleIds", .text)
             }
         }
+
+        migrator.registerMigration("v9_year_scan_results") { db in
+            try db.create(table: "year_scan_result") { t in
+                t.column("id", .text).primaryKey()
+                t.column("mailboxAccountId", .text).notNull()
+                    .references("mailbox_account", column: "id", onDelete: .cascade)
+                t.column("messagePk", .integer).notNull()
+                    .references("message", column: "pk", onDelete: .cascade)
+                t.column("providerMessageId", .text).notNull()
+                t.column("threadId", .text)
+                t.column("subject", .text).notNull()
+                t.column("snippet", .text).notNull()
+                t.column("score", .double).notNull()
+                t.column("matchedReasons", .text).notNull()
+                t.column("detectedAt", .datetime).notNull()
+            }
+
+            try db.create(table: "year_scan_state") { t in
+                t.column("id", .text).primaryKey()
+                t.column("lastChecked", .datetime)
+                t.column("scannedMessageCount", .integer).notNull().defaults(to: 0)
+                t.column("coverageSummary", .text).notNull().defaults(to: "")
+            }
+        }
+
+        migrator.registerMigration("v10_year_scan_state_progress") { db in
+            try db.alter(table: "year_scan_state") { t in
+                t.add(column: "isInProgress", .boolean).notNull().defaults(to: false)
+                t.add(column: "statusMessage", .text)
+                t.add(column: "updatedAt", .datetime)
+            }
+        }
+
+        migrator.registerMigration("v11_obligation_repeat_tracking") { db in
+            try db.alter(table: "obligation") { t in
+                t.add(column: "repeatCount", .integer).notNull().defaults(to: 1)
+                t.add(column: "lastSeenAt", .datetime)
+            }
+        }
+
+        migrator.registerMigration("v12_obligation_projection") { db in
+            try db.create(table: "obligation_projection") { t in
+                t.column("obligationId", .text).primaryKey()
+                t.column("state", .text).notNull()
+                t.column("confidence", .double).notNull()
+                t.column("dueDate", .datetime)
+                t.column("dueBucket", .text).notNull()
+                t.column("primaryThreadId", .text)
+                t.column("lastActionAt", .datetime)
+                t.column("updatedAt", .datetime).notNull()
+            }
+
+            try db.create(index: "obligation_projection_state", on: "obligation_projection", columns: ["state"])
+            try db.create(index: "obligation_projection_dueDate", on: "obligation_projection", columns: ["dueDate"])
+            try db.create(index: "obligation_projection_thread", on: "obligation_projection", columns: ["primaryThreadId"])
+
+            try db.execute(sql: """
+                INSERT INTO obligation_projection (
+                    obligationId,
+                    state,
+                    confidence,
+                    dueDate,
+                    dueBucket,
+                    primaryThreadId,
+                    lastActionAt,
+                    updatedAt
+                )
+                SELECT
+                    o.id,
+                    CASE
+                        WHEN o.status = 'dismissed' THEN 'suppressed'
+                        WHEN o.status = 'done' THEN 'resolved'
+                        WHEN o.status = 'snoozed' THEN 'snoozed'
+                        WHEN o.status = 'open' AND o.deadlineAt IS NOT NULL AND o.deadlineAt < datetime('now') THEN 'overdue'
+                        WHEN o.status = 'open' AND o.confidence < 0.6 THEN 'needsReview'
+                        ELSE 'active'
+                    END AS state,
+                    o.confidence,
+                    o.deadlineAt,
+                    CASE
+                        WHEN o.deadlineAt IS NULL THEN 'noDueDate'
+                        WHEN o.deadlineAt < datetime('now') THEN 'overdue'
+                        WHEN date(o.deadlineAt) = date('now') THEN 'today'
+                        WHEN o.deadlineAt <= datetime('now', '+3 days') THEN 'next3Days'
+                        WHEN o.deadlineAt <= datetime('now', '+7 days') THEN 'next7Days'
+                        ELSE 'later'
+                    END AS dueBucket,
+                    COALESCE(m.threadId, m.providerMessageId) AS primaryThreadId,
+                    o.updatedAt,
+                    o.updatedAt
+                FROM obligation o
+                JOIN message m ON m.pk = o.messagePk;
+            """)
+        }
+
+        migrator.registerMigration("v13_candidate_score_double") { db in
+            try db.execute(sql: """
+                CREATE TABLE candidate_score_new (
+                    messagePk INTEGER NOT NULL PRIMARY KEY REFERENCES message(pk) ON DELETE CASCADE,
+                    score DOUBLE NOT NULL,
+                    reasons TEXT,
+                    rulesVersion INTEGER NOT NULL DEFAULT 1,
+                    createdAt DATETIME NOT NULL,
+                    updatedAt DATETIME,
+                    matchedRuleIds TEXT
+                );
+            """)
+
+            try db.execute(sql: """
+                INSERT INTO candidate_score_new (
+                    messagePk,
+                    score,
+                    reasons,
+                    rulesVersion,
+                    createdAt,
+                    updatedAt,
+                    matchedRuleIds
+                )
+                SELECT
+                    messagePk,
+                    CAST(score AS DOUBLE),
+                    reasons,
+                    rulesVersion,
+                    createdAt,
+                    updatedAt,
+                    matchedRuleIds
+                FROM candidate_score;
+            """)
+
+            try db.execute(sql: "DROP TABLE candidate_score;")
+            try db.execute(sql: "ALTER TABLE candidate_score_new RENAME TO candidate_score;")
+        }
+
+        migrator.registerMigration("v14_obligation_projection_fk") { db in
+            try db.execute(sql: """
+                CREATE TABLE obligation_projection_new (
+                    obligationId TEXT NOT NULL PRIMARY KEY REFERENCES obligation(id) ON DELETE CASCADE,
+                    state TEXT NOT NULL,
+                    confidence DOUBLE NOT NULL,
+                    dueDate DATETIME,
+                    dueBucket TEXT NOT NULL,
+                    primaryThreadId TEXT,
+                    lastActionAt DATETIME,
+                    updatedAt DATETIME NOT NULL
+                );
+            """)
+
+            try db.execute(sql: """
+                INSERT INTO obligation_projection_new (
+                    obligationId,
+                    state,
+                    confidence,
+                    dueDate,
+                    dueBucket,
+                    primaryThreadId,
+                    lastActionAt,
+                    updatedAt
+                )
+                SELECT
+                    p.obligationId,
+                    p.state,
+                    p.confidence,
+                    p.dueDate,
+                    p.dueBucket,
+                    p.primaryThreadId,
+                    p.lastActionAt,
+                    p.updatedAt
+                FROM obligation_projection p
+                JOIN obligation o ON o.id = p.obligationId;
+            """)
+
+            try db.execute(sql: "DROP TABLE obligation_projection;")
+            try db.execute(sql: "ALTER TABLE obligation_projection_new RENAME TO obligation_projection;")
+
+            try db.create(index: "obligation_projection_state", on: "obligation_projection", columns: ["state"])
+            try db.create(index: "obligation_projection_dueDate", on: "obligation_projection", columns: ["dueDate"])
+            try db.create(index: "obligation_projection_thread", on: "obligation_projection", columns: ["primaryThreadId"])
+        }
     }
 }

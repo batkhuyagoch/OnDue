@@ -15,6 +15,7 @@
 		9A28A67C2F29B29300B0DB3C /* GoogleService-Info.plist in Resources */ = {isa = PBXBuildFile; fileRef = 9A28A6792F29AE1000B0DB3C /* GoogleService-Info.plist */; };
 		9A28A7132F2A0001 /* RuleEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A28A7102F2A0001 /* RuleEngineTests.swift */; };
 		9A28A7142F2A0001 /* SampleEmails.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A28A7112F2A0001 /* SampleEmails.swift */; };
+		9A28A77A2F2B1001 /* TextSanitizerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A28A7792F2B1001 /* TextSanitizerTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -37,6 +38,7 @@
 		9A28A7102F2A0001 /* RuleEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuleEngineTests.swift; sourceTree = "<group>"; };
 		9A28A7112F2A0001 /* SampleEmails.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleEmails.swift; sourceTree = "<group>"; };
 		9A28A7122F2A0001 /* OnDueTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = OnDueTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		9A28A7792F2B1001 /* TextSanitizerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextSanitizerTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -47,11 +49,20 @@
 				Database/FTS.swift,
 				Database/Migrations.swift,
 				Repositories/CandidateScoreRepository.swift,
+				Repositories/DailyDigestScheduler.swift,
+				Repositories/DateExtractor.swift,
 				Repositories/FeedbackRepository.swift,
+				Repositories/IMPLEMENTATION_ROADMAP.md,
 				Repositories/MailboxAccountRepository.swift,
+				Repositories/ManualPromotion.swift,
 				Repositories/MessageRepository.swift,
+				Repositories/ObligationProjectionRepository.swift,
 				Repositories/ObligationRepository.swift,
+				Repositories/ProjectContext.swift,
 				Repositories/RuleWeightRepository.swift,
+				Repositories/SuppressionRepository.swift,
+				Repositories/USER_EXPERIENCE_GUIDE.md,
+				Repositories/YearScanRepository.swift,
 			);
 			target = 9A28A4812F27AD0F00B0DB3C /* OnDue */;
 		};
@@ -62,6 +73,11 @@
 				Connect/ConnectGmailViewModel.swift,
 				Digest/DigestView.swift,
 				Digest/DigestViewModel.swift,
+				GoldDatasetLabelView.swift,
+				GoldDatasetLabelViewModel.swift,
+				Settings/SettingsView.swift,
+				YearScan/YearScanView.swift,
+				YearScan/YearScanViewModel.swift,
 			);
 			target = 9A28A4812F27AD0F00B0DB3C /* OnDue */;
 		};
@@ -69,14 +85,17 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Background/BackgroundRefreshService.swift,
+				Background/YearScanBackgroundManager.swift,
 				Extraction/CandidateSelector.swift,
 				Extraction/EmailParser.swift,
 				Extraction/ObligationExtractor.swift,
 				Extraction/RuleEngine.swift,
+				Extraction/RuleEngineEnhanced.swift,
 				Gmail/GmailAuthService.swift,
 				Gmail/GmailClient.swift,
 				Gmail/GmailConfiguration.swift,
 				Gmail/GmailSyncService.swift,
+				YearScan/YearScanRunner.swift,
 			);
 			target = 9A28A4812F27AD0F00B0DB3C /* OnDue */;
 		};
@@ -84,7 +103,10 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				DateParsing.swift,
+				GoldDatasetExporter.swift,
+				GoldDatasetStore.swift,
 				Logger.swift,
+				TextSanitizer.swift,
 			);
 			target = 9A28A4812F27AD0F00B0DB3C /* OnDue */;
 		};
@@ -96,8 +118,11 @@
 				MailboxAccount.swift,
 				Message.swift,
 				Obligation.swift,
+				ObligationProjection.swift,
 				RuleWeight.swift,
 				Suppression.swift,
+				YearScanItem.swift,
+				YearScanSnapshot.swift,
 			);
 			target = 9A28A4812F27AD0F00B0DB3C /* OnDue */;
 		};
@@ -205,6 +230,7 @@
 			children = (
 				9A28A7102F2A0001 /* RuleEngineTests.swift */,
 				9A28A7112F2A0001 /* SampleEmails.swift */,
+				9A28A7792F2B1001 /* TextSanitizerTests.swift */,
 			);
 			path = OnDueTests;
 			sourceTree = "<group>";
@@ -331,6 +357,7 @@
 			files = (
 				9A28A7132F2A0001 /* RuleEngineTests.swift in Sources */,
 				9A28A7142F2A0001 /* SampleEmails.swift in Sources */,
+				9A28A77A2F2B1001 /* TextSanitizerTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -622,10 +649,10 @@
 		};
 		9A28A6632F299CE400B0DB3C /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */ = {
 			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/google/GoogleSignIn-iOS";
+			repositoryURL = "https://github.com/batkhuyagoch/GoogleSignIn-iOS.git";
 			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 9.1.0;
+				branch = "patch/spm-names";
+				kind = branch;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */

@@ -5,6 +5,7 @@ protocol ObligationExtracting: Sendable {
     func extract(from messages: [MessageRecord], mailboxAccountId: String) async throws -> [ObligationRecord]
     func assess(message: MessageRecord, mailboxAccountId: String) async throws -> RuleAssessment
     func makeObligation(from assessment: RuleAssessment, message: MessageRecord, mailboxAccountId: String, messagePk: Int64) -> ObligationRecord
+    func scanYear(messages: [MessageRecord], mailboxAccountId: String) async throws -> [YearScanItem]
 }
 
 final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
@@ -12,15 +13,18 @@ final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
     private let ruleEngine: RuleEngine
     private let ruleWeightRepository: RuleWeightRepositorying
     private let candidateScoreRepository: CandidateScoreRepositorying
+    private let suppressionRepository: SuppressionRepositorying?
 
     init(
         preferences: FilterPreferencesStoring,
         ruleWeightRepository: RuleWeightRepositorying,
-        candidateScoreRepository: CandidateScoreRepositorying
+        candidateScoreRepository: CandidateScoreRepositorying,
+        suppressionRepository: SuppressionRepositorying? = nil
     ) {
         self.ruleEngine = RuleEngine(preferences: preferences)
         self.ruleWeightRepository = ruleWeightRepository
         self.candidateScoreRepository = candidateScoreRepository
+        self.suppressionRepository = suppressionRepository
     }
 
     func extract(from messages: [MessageRecord], mailboxAccountId: String) async throws -> [ObligationRecord] {
@@ -29,11 +33,22 @@ final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
 
         for message in messages {
             guard let pk = message.pk else { continue }
+            if let suppressionRepository {
+                let blocked = (try? await suppressionRepository.isBlocked(
+                    mailboxAccountId: mailboxAccountId,
+                    sender: message.fromEmail,
+                    domain: message.fromDomain
+                )) ?? false
+                if blocked {
+                    try? await candidateScoreRepository.delete(messagePk: pk)
+                    continue
+                }
+            }
             let parsedEmail = parser.parse(message: message)
             let assessment = ruleEngine.assess(email: parsedEmail, weightMultipliers: multipliers)
             let threadKey = message.threadId ?? message.providerMessageId
 
-            if ruleEngine.isAccepted(assessment) {
+            if ruleEngine.isAccepted(assessment) || ruleEngine.isBorderline(assessment) {
                 if let existing = acceptedByThread[threadKey] {
                     if isPreferred(assessment, over: existing.assessment) {
                         acceptedByThread[threadKey] = (assessment, message, pk)
@@ -42,14 +57,6 @@ final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
                     acceptedByThread[threadKey] = (assessment, message, pk)
                 }
                 try? await candidateScoreRepository.delete(messagePk: pk)
-            } else if ruleEngine.isBorderline(assessment) {
-                let record = CandidateScoreRecord(
-                    messagePk: pk,
-                    score: assessment.score,
-                    matchedRuleIds: assessment.matchedRuleIds.joined(separator: ","),
-                    reasons: assessment.matchedReasons.joined(separator: " | ")
-                )
-                try await candidateScoreRepository.saveBorderline(record)
             } else {
                 try? await candidateScoreRepository.delete(messagePk: pk)
             }
@@ -77,7 +84,11 @@ final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
         mailboxAccountId: String,
         messagePk: Int64
     ) -> ObligationRecord {
-        let obligationKey = "\(message.providerMessageId)_\(assessment.category.rawValue)"
+        let obligationKey = makeObligationKey(
+            mailboxAccountId: mailboxAccountId,
+            senderDomain: message.fromDomain,
+            matchedRuleIds: assessment.matchedRuleIds
+        )
         return ObligationRecord(
             mailboxAccountId: mailboxAccountId,
             messagePk: messagePk,
@@ -92,8 +103,52 @@ final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
             score: assessment.score,
             matchedRuleIds: assessment.matchedRuleIds.joined(separator: ","),
             matchedSignalTypes: assessment.matchedSignalTypes.map { $0.rawValue }.joined(separator: ","),
-            matchedReasons: assessment.matchedReasons.joined(separator: " | ")
+            matchedReasons: assessment.matchedReasons.joined(separator: " | "),
+            repeatCount: 1,
+            lastSeenAt: message.internalDate
         )
+    }
+
+    func scanYear(messages: [MessageRecord], mailboxAccountId: String) async throws -> [YearScanItem] {
+        var bestByThread: [String: YearScanItem] = [:]
+
+        for message in messages {
+            guard let pk = message.pk else { continue }
+            if let suppressionRepository {
+                let blocked = (try? await suppressionRepository.isBlocked(
+                    mailboxAccountId: mailboxAccountId,
+                    sender: message.fromEmail,
+                    domain: message.fromDomain
+                )) ?? false
+                if blocked {
+                    continue
+                }
+            }
+            let parsedEmail = parser.parse(message: message)
+            guard let assessment = ruleEngine.evaluateYearScan(email: parsedEmail) else { continue }
+            let threadKey = message.threadId ?? message.providerMessageId
+
+            let item = YearScanItem(
+                mailboxAccountId: mailboxAccountId,
+                messagePk: pk,
+                providerMessageId: message.providerMessageId,
+                threadId: message.threadId,
+                subject: message.subject,
+                snippet: message.snippet ?? assessment.evidenceQuote,
+                score: assessment.score,
+                matchedReasons: assessment.matchedReasons
+            )
+
+            if let existing = bestByThread[threadKey] {
+                if item.score > existing.score {
+                    bestByThread[threadKey] = item
+                }
+            } else {
+                bestByThread[threadKey] = item
+            }
+        }
+
+        return bestByThread.values.sorted { $0.score > $1.score }
     }
 
     private func isPreferred(_ candidate: RuleAssessment, over existing: RuleAssessment) -> Bool {
@@ -110,5 +165,15 @@ final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
             return true
         }
         return false
+    }
+
+    private func makeObligationKey(
+        mailboxAccountId: String,
+        senderDomain: String?,
+        matchedRuleIds: [String]
+    ) -> String {
+        let domain = (senderDomain ?? "unknown").lowercased()
+        let rulesKey = matchedRuleIds.map { $0.lowercased() }.sorted().joined(separator: "|")
+        return "\(mailboxAccountId)|\(domain)|\(rulesKey)"
     }
 }

@@ -7,16 +7,26 @@ protocol ObligationRepositorying: Sendable {
     func save(_ record: ObligationRecord) async throws
     func save(_ records: [ObligationRecord]) async throws
     func updateStatus(id: String, status: ObligationStatus) async throws
+    func markReviewed(id: String) async throws
     func snooze(id: String, until: Date) async throws
     func dismiss(id: String) async throws
     func markDone(id: String) async throws
+    func dismissBySender(mailboxAccountId: String, sender: String) async throws
+    func dismissByDomain(mailboxAccountId: String, domain: String) async throws
+    func promoteManually(
+        messageId: String,
+        mailboxAccountId: String,
+        environment: AppEnvironment
+    ) async throws -> ObligationItem
 }
 
 final class ObligationRepository: ObligationRepositorying, @unchecked Sendable {
     private let database: Database
+    private let projectionRepository: ObligationProjectionRepositorying?
     
-    init(database: Database) {
+    init(database: Database, projectionRepository: ObligationProjectionRepositorying? = nil) {
         self.database = database
+        self.projectionRepository = projectionRepository
     }
     
     func fetchTopDigest(limit: Int) async throws -> [ObligationItem] {
@@ -57,6 +67,7 @@ final class ObligationRepository: ObligationRepositorying, @unchecked Sendable {
     func save(_ record: ObligationRecord) async throws {
         try await database.writeAsync { db in
             try record.save(db)
+            try self.projectionRepository?.upsert(obligation: record, in: db)
         }
     }
 
@@ -68,7 +79,7 @@ final class ObligationRepository: ObligationRepositorying, @unchecked Sendable {
 
             for (mailboxAccountId, group) in grouped {
                 let obligationKeys = Array(Set(group.map { $0.obligationKey }))
-                var existingByKey: [String: (id: String, createdAt: Date)] = [:]
+                var existingByKey: [String: (id: String, createdAt: Date, repeatCount: Int, lastSeenAt: Date?)] = [:]
 
                 var start = 0
                 while start < obligationKeys.count {
@@ -76,7 +87,7 @@ final class ObligationRepository: ObligationRepositorying, @unchecked Sendable {
                     let chunk = Array(obligationKeys[start..<end])
                     let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ",")
                     let sql = """
-                        SELECT obligationKey, id, createdAt
+                        SELECT obligationKey, id, createdAt, repeatCount, lastSeenAt
                         FROM obligation
                         WHERE mailboxAccountId = ?
                           AND obligationKey IN (\(placeholders))
@@ -88,7 +99,14 @@ final class ObligationRepository: ObligationRepositorying, @unchecked Sendable {
                         if let obligationKey: String = row["obligationKey"],
                            let id: String = row["id"],
                            let createdAt: Date = row["createdAt"] {
-                            existingByKey[obligationKey] = (id: id, createdAt: createdAt)
+                            let repeatCount: Int = row["repeatCount"] ?? 1
+                            let lastSeenAt: Date? = row["lastSeenAt"]
+                            existingByKey[obligationKey] = (
+                                id: id,
+                                createdAt: createdAt,
+                                repeatCount: repeatCount,
+                                lastSeenAt: lastSeenAt
+                            )
                         }
                     }
 
@@ -99,13 +117,34 @@ final class ObligationRepository: ObligationRepositorying, @unchecked Sendable {
                     print("📌 ObligationRepository.save: \(mailboxAccountId) found \(existingByKey.count) existing obligations; will update instead of insert")
                 }
 
-                for var record in group {
-                    if let existing = existingByKey[record.obligationKey] {
+                let groupedByKey = Dictionary(grouping: group, by: { $0.obligationKey })
+                for (key, recordsForKey) in groupedByKey {
+                    var record = recordsForKey.max(by: { lhs, rhs in
+                        if lhs.score != rhs.score { return lhs.score < rhs.score }
+                        let lhsDate = lhs.deadlineAt ?? .distantFuture
+                        let rhsDate = rhs.deadlineAt ?? .distantFuture
+                        return lhsDate > rhsDate
+                    }) ?? recordsForKey[0]
+
+                    let incomingCount = recordsForKey.count
+                    let lastSeen = recordsForKey.compactMap(\.lastSeenAt).max()
+                    record.repeatCount = incomingCount
+                    record.lastSeenAt = lastSeen ?? record.lastSeenAt
+
+                    if let existing = existingByKey[key] {
                         record.id = existing.id
                         record.createdAt = existing.createdAt
                         record.updatedAt = Date()
+                        record.repeatCount = existing.repeatCount + incomingCount
+                        if let existingSeen = existing.lastSeenAt, let newSeen = record.lastSeenAt {
+                            record.lastSeenAt = max(existingSeen, newSeen)
+                        } else if existing.lastSeenAt != nil {
+                            record.lastSeenAt = existing.lastSeenAt
+                        }
                     }
+
                     try record.save(db)
+                    try self.projectionRepository?.upsert(obligation: record, in: db)
                 }
             }
         }
@@ -121,6 +160,27 @@ final class ObligationRepository: ObligationRepositorying, @unchecked Sendable {
                 """,
                 arguments: [status.rawValue, Date(), id]
             )
+            if let record = try? ObligationRecord.fetchOne(db, key: id) {
+                try self.projectionRepository?.upsert(obligation: record, in: db)
+            }
+        }
+    }
+
+    func markReviewed(id: String) async throws {
+        try await database.writeAsync { db in
+            try db.execute(
+                sql: """
+                    UPDATE obligation_projection
+                    SET state = ?, lastActionAt = ?, updatedAt = ?
+                    WHERE obligationId = ?
+                """,
+                arguments: [
+                    ObligationLifecycleState.active.rawValue,
+                    Date(),
+                    Date(),
+                    id
+                ]
+            )
         }
     }
     
@@ -134,6 +194,9 @@ final class ObligationRepository: ObligationRepositorying, @unchecked Sendable {
                 """,
                 arguments: [ObligationStatus.snoozed.rawValue, until, Date(), id]
             )
+            if let record = try? ObligationRecord.fetchOne(db, key: id) {
+                try self.projectionRepository?.upsert(obligation: record, in: db)
+            }
         }
     }
     
@@ -147,6 +210,9 @@ final class ObligationRepository: ObligationRepositorying, @unchecked Sendable {
                 """,
                 arguments: [ObligationStatus.dismissed.rawValue, Date(), Date(), id]
             )
+            if let record = try? ObligationRecord.fetchOne(db, key: id) {
+                try self.projectionRepository?.upsert(obligation: record, in: db)
+            }
         }
     }
     
@@ -159,6 +225,103 @@ final class ObligationRepository: ObligationRepositorying, @unchecked Sendable {
                     WHERE id = ?
                 """,
                 arguments: [ObligationStatus.done.rawValue, Date(), Date(), id]
+            )
+            if let record = try? ObligationRecord.fetchOne(db, key: id) {
+                try self.projectionRepository?.upsert(obligation: record, in: db)
+            }
+        }
+    }
+
+    func dismissBySender(mailboxAccountId: String, sender: String) async throws {
+        try await database.writeAsync { db in
+            try db.execute(
+                sql: """
+                    UPDATE obligation
+                    SET status = ?, resolvedAt = ?, updatedAt = ?
+                    WHERE mailboxAccountId = ?
+                      AND messagePk IN (
+                        SELECT pk FROM message
+                        WHERE mailboxAccountId = ?
+                          AND fromEmail = ?
+                      )
+                """,
+                arguments: [
+                    ObligationStatus.dismissed.rawValue,
+                    Date(),
+                    Date(),
+                    mailboxAccountId,
+                    mailboxAccountId,
+                    sender
+                ]
+            )
+            try db.execute(
+                sql: """
+                    UPDATE obligation_projection
+                    SET state = ?, lastActionAt = ?, updatedAt = ?
+                    WHERE obligationId IN (
+                        SELECT o.id
+                        FROM obligation o
+                        JOIN message m ON m.pk = o.messagePk
+                        WHERE o.mailboxAccountId = ?
+                          AND m.mailboxAccountId = ?
+                          AND m.fromEmail = ?
+                    )
+                """,
+                arguments: [
+                    ObligationLifecycleState.suppressed.rawValue,
+                    Date(),
+                    Date(),
+                    mailboxAccountId,
+                    mailboxAccountId,
+                    sender
+                ]
+            )
+        }
+    }
+
+    func dismissByDomain(mailboxAccountId: String, domain: String) async throws {
+        try await database.writeAsync { db in
+            try db.execute(
+                sql: """
+                    UPDATE obligation
+                    SET status = ?, resolvedAt = ?, updatedAt = ?
+                    WHERE mailboxAccountId = ?
+                      AND messagePk IN (
+                        SELECT pk FROM message
+                        WHERE mailboxAccountId = ?
+                          AND fromDomain = ?
+                      )
+                """,
+                arguments: [
+                    ObligationStatus.dismissed.rawValue,
+                    Date(),
+                    Date(),
+                    mailboxAccountId,
+                    mailboxAccountId,
+                    domain
+                ]
+            )
+            try db.execute(
+                sql: """
+                    UPDATE obligation_projection
+                    SET state = ?, lastActionAt = ?, updatedAt = ?
+                    WHERE obligationId IN (
+                        SELECT o.id
+                        FROM obligation o
+                        JOIN message m ON m.pk = o.messagePk
+                        WHERE o.mailboxAccountId = ?
+                          AND m.mailboxAccountId = ?
+                          AND m.fromDomain = ?
+                    )
+                """,
+                arguments: [
+                    ObligationLifecycleState.suppressed.rawValue,
+                    Date(),
+                    Date(),
+                    mailboxAccountId,
+                    mailboxAccountId,
+                    domain
+                ]
             )
         }
     }
@@ -206,7 +369,11 @@ extension ObligationRepository {
                 matchedRuleIds: ["deadline_keyword", "date_detected"],
                 matchedSignalTypes: ["keyword", "date"],
                 matchedReasons: ["Contains a deadline keyword", "Detected a date"],
-                snoozedUntil: nil
+                snoozedUntil: nil,
+                repeatCount: 1,
+                lastSeenAt: now,
+                createdAt: now,
+                updatedAt: now
             ),
             ObligationItem(
                 id: UUID().uuidString,
@@ -223,7 +390,11 @@ extension ObligationRepository {
                 matchedRuleIds: ["request_keyword", "attachment_present"],
                 matchedSignalTypes: ["keyword", "attachment"],
                 matchedReasons: ["Explicit request language", "Attachment included"],
-                snoozedUntil: nil
+                snoozedUntil: nil,
+                repeatCount: 1,
+                lastSeenAt: now,
+                createdAt: now,
+                updatedAt: now
             ),
             ObligationItem(
                 id: UUID().uuidString,
@@ -240,7 +411,11 @@ extension ObligationRepository {
                 matchedRuleIds: ["travel_keyword", "date_detected"],
                 matchedSignalTypes: ["keyword", "date"],
                 matchedReasons: ["Travel itinerary or booking", "Detected a date"],
-                snoozedUntil: nil
+                snoozedUntil: nil,
+                repeatCount: 2,
+                lastSeenAt: now,
+                createdAt: now,
+                updatedAt: now
             ),
             ObligationItem(
                 id: UUID().uuidString,
@@ -257,7 +432,11 @@ extension ObligationRepository {
                 matchedRuleIds: ["policy_keyword", "date_detected"],
                 matchedSignalTypes: ["keyword", "date"],
                 matchedReasons: ["Policy or renewal language", "Detected a date"],
-                snoozedUntil: nil
+                snoozedUntil: nil,
+                repeatCount: 1,
+                lastSeenAt: now,
+                createdAt: now,
+                updatedAt: now
             ),
             ObligationItem(
                 id: UUID().uuidString,
@@ -274,7 +453,11 @@ extension ObligationRepository {
                 matchedRuleIds: ["request_keyword"],
                 matchedSignalTypes: ["keyword"],
                 matchedReasons: ["Explicit request language"],
-                snoozedUntil: nil
+                snoozedUntil: nil,
+                repeatCount: 1,
+                lastSeenAt: now,
+                createdAt: now,
+                updatedAt: now
             ),
             ObligationItem(
                 id: UUID().uuidString,
@@ -291,7 +474,11 @@ extension ObligationRepository {
                 matchedRuleIds: ["policy_keyword"],
                 matchedSignalTypes: ["keyword"],
                 matchedReasons: ["Policy or renewal language"],
-                snoozedUntil: nil
+                snoozedUntil: nil,
+                repeatCount: 1,
+                lastSeenAt: now,
+                createdAt: now,
+                updatedAt: now
             ),
         ]
     }

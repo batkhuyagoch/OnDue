@@ -4,7 +4,16 @@ import GRDB
 protocol MessageRepositorying: Sendable {
     func save(_ messages: [MessageRecord]) async throws
     func fetchRecent(mailboxAccountId: String, daysBack: Int) async throws -> [MessageRecord]
+    func fetchRecent(mailboxAccountId: String, daysBack: Int, limit: Int) async throws -> [MessageRecord]
+    func fetchRecentPage(
+        mailboxAccountId: String,
+        daysBack: Int,
+        beforeDate: Date?,
+        beforePk: Int64?,
+        limit: Int
+    ) async throws -> [MessageRecord]
     func fetchByPk(_ pk: Int64) async throws -> MessageRecord?
+    func fetchByProviderMessageId(_ providerMessageId: String) async throws -> MessageRecord?
     func fetchProviderMessageIdsWithBodyText(mailboxAccountId: String, providerMessageIds: [String]) async throws -> Set<String>
     func search(query: String, mailboxAccountId: String, limit: Int) async throws -> [MessageRecord]
     func softDeleteOlderThan(mailboxAccountId: String, daysBack: Int) async throws -> Int
@@ -108,10 +117,61 @@ final class MessageRepository: MessageRepositorying, @unchecked Sendable {
                 .fetchAll(db)
         }
     }
+
+    func fetchRecent(mailboxAccountId: String, daysBack: Int, limit: Int) async throws -> [MessageRecord] {
+        let cutoffDate = Calendar.current.date(byAdding: .day, value: -daysBack, to: Date()) ?? Date()
+
+        return try await database.readAsync { db in
+            try MessageRecord
+                .filter(Column("mailboxAccountId") == mailboxAccountId)
+                .filter(Column("internalDate") >= cutoffDate)
+                .filter(Column("isDeleted") == false)
+                .order(Column("internalDate").desc)
+                .limit(limit)
+                .fetchAll(db)
+        }
+    }
+
+    func fetchRecentPage(
+        mailboxAccountId: String,
+        daysBack: Int,
+        beforeDate: Date?,
+        beforePk: Int64?,
+        limit: Int
+    ) async throws -> [MessageRecord] {
+        let cutoffDate = Calendar.current.date(byAdding: .day, value: -daysBack, to: Date()) ?? Date()
+
+        return try await database.readAsync { db in
+            var request = MessageRecord
+                .filter(Column("mailboxAccountId") == mailboxAccountId)
+                .filter(Column("internalDate") >= cutoffDate)
+                .filter(Column("isDeleted") == false)
+                .order(Column("internalDate").desc, Column("pk").desc)
+                .limit(limit)
+
+            if let beforeDate, let beforePk {
+                request = request.filter(
+                    sql: "internalDate < ? OR (internalDate = ? AND pk < ?)",
+                    arguments: [beforeDate, beforeDate, beforePk]
+                )
+            }
+
+            return try request.fetchAll(db)
+        }
+    }
     
     func fetchByPk(_ pk: Int64) async throws -> MessageRecord? {
         try await database.readAsync { db in
             try MessageRecord.fetchOne(db, key: ["pk": pk])
+        }
+    }
+
+    func fetchByProviderMessageId(_ providerMessageId: String) async throws -> MessageRecord? {
+        try await database.readAsync { db in
+            try MessageRecord
+                .filter(Column("providerMessageId") == providerMessageId)
+                .order(Column("internalDate").desc)
+                .fetchOne(db)
         }
     }
 

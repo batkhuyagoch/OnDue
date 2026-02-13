@@ -18,6 +18,28 @@ final class RuleWeightRepository: RuleWeightRepositorying, @unchecked Sendable {
     private let growthFactor: Double = 1.1
     private let decayFactor: Double = 0.85
     private let snoozeFactor: Double = 1.03
+    private let legalGrowthFactor: Double = 1.25
+    private let legalDecayFactor: Double = 0.7
+    private let legalSnoozeFactor: Double = 1.07
+    private let legalRuleIds: Set<String> = [
+        "legal_sender_gov_allowlist",
+        "legal_sender_uscis",
+        "legal_sender_state",
+        "legal_sender_ssa",
+        "legal_sender_irs",
+        "legal_sender_courts",
+        "uscis_receipt_notice",
+        "uscis_rfe",
+        "uscis_biometrics",
+        "uscis_interview",
+        "immigration_deadline",
+        "irs_notice",
+        "jury_duty",
+        "court_summons",
+        "passport_renewal",
+        "ssa_notice",
+        "legal_notice"
+    ]
 
     init(database: Database) {
         self.database = database
@@ -46,7 +68,7 @@ final class RuleWeightRepository: RuleWeightRepositorying, @unchecked Sendable {
                     .fetchOne(db)
 
                 var record = existing ?? RuleWeightRecord(mailboxAccountId: mailboxAccountId, ruleId: ruleId)
-                let updated = self.updatedMultiplier(from: record.multiplier, action: action)
+                let updated = self.updatedMultiplier(from: record.multiplier, action: action, ruleId: ruleId)
                 record.multiplier = updated
                 record.updatedAt = Date()
                 switch action {
@@ -64,15 +86,20 @@ final class RuleWeightRepository: RuleWeightRepositorying, @unchecked Sendable {
         }
     }
 
-    private func updatedMultiplier(from current: Double, action: FeedbackRecord.FeedbackAction) -> Double {
+    private func updatedMultiplier(
+        from current: Double,
+        action: FeedbackRecord.FeedbackAction,
+        ruleId: String
+    ) -> Double {
+        let isLegal = legalRuleIds.contains(ruleId)
         let next: Double
         switch action {
         case .accepted:
-            next = current * growthFactor
+            next = current * (isLegal ? legalGrowthFactor : growthFactor)
         case .dismissed:
-            next = current * decayFactor
+            next = current * (isLegal ? legalDecayFactor : decayFactor)
         case .snoozed:
-            next = current * snoozeFactor
+            next = current * (isLegal ? legalSnoozeFactor : snoozeFactor)
         default:
             next = current
         }

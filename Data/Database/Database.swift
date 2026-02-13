@@ -11,13 +11,26 @@ final class Database {
         do {
             return try Database()
         } catch {
+            initializationError = error
+            Logger.info("Failed to initialize database: \(error)")
+            if let fallback = try? Database(inMemory: true) {
+                Logger.info("Falling back to in-memory database.")
+                return fallback
+            }
             fatalError("Failed to initialize database: \(error)")
         }
     }()
+
+    static var initializationError: Error?
     
     init(inMemory: Bool = false) throws {
+        var config = Configuration()
+        config.prepareDatabase { db in
+            try db.execute(sql: "PRAGMA journal_mode=WAL")
+        }
+
         if inMemory {
-            dbPool = try DatabasePool(path: ":memory:")
+            dbPool = try DatabasePool(path: ":memory:", configuration: config)
         } else {
             let fileManager = FileManager.default
             let appSupportURL = try fileManager.url(
@@ -27,7 +40,7 @@ final class Database {
                 create: true
             )
             let dbURL = appSupportURL.appendingPathComponent("OnDue.sqlite")
-            dbPool = try DatabasePool(path: dbURL.path)
+            dbPool = try DatabasePool(path: dbURL.path, configuration: config)
         }
         
         try migrate()

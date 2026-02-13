@@ -98,7 +98,12 @@ final class GmailSyncService: GmailSyncServicing, @unchecked Sendable {
         let messages = summaries.map {
             Self.makeMessageRecord(from: $0, mailboxAccountId: mailboxAccountId, bodyText: nil, bodyHtml: nil, attachmentTypes: nil, hasPdf: false, hasCalendar: false)
         }
-        let candidates = messages.filter { candidateSelector.isCandidate($0) }
+        var candidates: [MessageRecord] = []
+        for message in messages {
+            if await candidateSelector.isCandidate(message) {
+                candidates.append(message)
+            }
+        }
         guard !candidates.isEmpty else { return }
 
         let candidateIds = candidates.map { $0.providerMessageId }
@@ -269,15 +274,19 @@ final class GmailSyncCoordinator: GmailSyncCoordinating, @unchecked Sendable {
             lastFullSyncAt: Date()
         )
 
-        let recentMessages = try await messageRepository.fetchRecent(
-            mailboxAccountId: mailboxAccountId,
-            daysBack: daysBackForExtraction
-        )
-        let obligations = try await obligationExtractor.extract(
-            from: recentMessages,
-            mailboxAccountId: mailboxAccountId
-        )
-        try await obligationRepository.save(obligations)
+        var obligationsCount = 0
+        if daysBackForExtraction > 0 {
+            let recentMessages = try await messageRepository.fetchRecent(
+                mailboxAccountId: mailboxAccountId,
+                daysBack: daysBackForExtraction
+            )
+            let obligations = try await obligationExtractor.extract(
+                from: recentMessages,
+                mailboxAccountId: mailboxAccountId
+            )
+            try await obligationRepository.save(obligations)
+            obligationsCount = obligations.count
+        }
 
         AppLog.info(
             "SyncCoordinator.backfill.complete",
@@ -287,13 +296,13 @@ final class GmailSyncCoordinator: GmailSyncCoordinating, @unchecked Sendable {
                 "endDate": endDate,
                 "messageIDs": syncResult.messageIDsCount,
                 "messagesSaved": syncResult.messagesSavedCount,
-                "obligations": obligations.count
+                "obligations": obligationsCount
             ]
         )
         return SyncReport(
             messageIDsCount: syncResult.messageIDsCount,
             messagesSavedCount: syncResult.messagesSavedCount,
-            obligationsCount: obligations.count,
+            obligationsCount: obligationsCount,
             deletedOldMessagesCount: 0
         )
     }

@@ -6,6 +6,7 @@ protocol MailboxAccountRepositorying: Sendable {
     func fetch(byEmail email: String) async throws -> MailboxAccountRecord?
     func fetch(byId id: String) async throws -> MailboxAccountRecord?
     func fetchFirst(provider: MailboxAccountRecord.Provider) async throws -> MailboxAccountRecord?
+    func fetchAll() async throws -> [MailboxAccountRecord]
     func updateSyncStatus(id: String, status: MailboxAccountRecord.SyncStatus, error: String?) async throws
     func updateSyncMetadata(id: String, gmailLastHistoryId: String?, lastFullSyncAt: Date?) async throws
 }
@@ -54,6 +55,14 @@ final class MailboxAccountRepository: MailboxAccountRepositorying, @unchecked Se
                 .filter(Column("provider") == provider.rawValue)
                 .order(Column("createdAt").desc)
                 .fetchOne(db)
+        }
+    }
+
+    func fetchAll() async throws -> [MailboxAccountRecord] {
+        try await database.readAsync { db in
+            try MailboxAccountRecord
+                .order(Column("createdAt").desc)
+                .fetchAll(db)
         }
     }
     

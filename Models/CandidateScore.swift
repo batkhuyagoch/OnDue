@@ -33,13 +33,3 @@ struct CandidateScoreRecord: Identifiable, Hashable, Codable, FetchableRecord, P
     }
 }
 
-struct BorderlineItem: Identifiable, Hashable {
-    let id: Int64
-    let messagePk: Int64
-    let mailboxAccountId: String
-    let subject: String
-    let snippet: String
-    let score: Double
-    let matchedRuleIds: [String]
-    let matchedReasons: [String]
-}

@@ -9,25 +9,37 @@ struct AppEnvironment {
     let filterPreferencesStore: FilterPreferencesStore
     let obligationExtractor: ObligationExtracting
     let obligationRepository: ObligationRepositorying
+    let obligationProjectionRepository: ObligationProjectionRepositorying
     let messageRepository: MessageRepositorying
     let mailboxAccountRepository: MailboxAccountRepositorying
     let feedbackRepository: FeedbackRepositorying
     let ruleWeightRepository: RuleWeightRepositorying
     let candidateScoreRepository: CandidateScoreRepositorying
+    let yearScanRepository: YearScanRepositorying
+    let suppressionRepository: SuppressionRepositorying
 
     static func live() -> AppEnvironment {
         let database = Database.shared
         let filterPreferencesStore = FilterPreferencesStore()
+        let suppressionRepository = SuppressionRepository(database: database)
         let gmailSyncService = GmailSyncService(
             database: database,
-            candidateSelector: CandidateSelector(preferences: filterPreferencesStore)
+            candidateSelector: CandidateSelector(
+                preferences: filterPreferencesStore,
+                suppressionRepository: suppressionRepository
+            )
         )
         let messageRepository = MessageRepository(database: database)
-        let obligationRepository = ObligationRepository(database: database)
+        let obligationProjectionRepository = ObligationProjectionRepository(database: database)
+        let obligationRepository = ObligationRepository(
+            database: database,
+            projectionRepository: obligationProjectionRepository
+        )
         let mailboxAccountRepository = MailboxAccountRepository(database: database)
         let feedbackRepository = FeedbackRepository(database: database)
         let ruleWeightRepository = RuleWeightRepository(database: database)
         let candidateScoreRepository = CandidateScoreRepository(database: database)
+        let yearScanRepository = YearScanRepository(database: database)
         let syncPolicyStore = SyncPolicyStore()
         return AppEnvironment(
             gmailAuthService: GmailAuthService.shared,
@@ -38,7 +50,8 @@ struct AppEnvironment {
                 obligationExtractor: ObligationExtractor(
                     preferences: filterPreferencesStore,
                     ruleWeightRepository: ruleWeightRepository,
-                    candidateScoreRepository: candidateScoreRepository
+                    candidateScoreRepository: candidateScoreRepository,
+                    suppressionRepository: suppressionRepository
                 ),
                 obligationRepository: obligationRepository,
                 mailboxAccountRepository: mailboxAccountRepository
@@ -48,14 +61,18 @@ struct AppEnvironment {
             obligationExtractor: ObligationExtractor(
                 preferences: filterPreferencesStore,
                 ruleWeightRepository: ruleWeightRepository,
-                candidateScoreRepository: candidateScoreRepository
+                candidateScoreRepository: candidateScoreRepository,
+                suppressionRepository: suppressionRepository
             ),
             obligationRepository: obligationRepository,
+            obligationProjectionRepository: obligationProjectionRepository,
             messageRepository: messageRepository,
             mailboxAccountRepository: mailboxAccountRepository,
             feedbackRepository: feedbackRepository,
             ruleWeightRepository: ruleWeightRepository,
-            candidateScoreRepository: candidateScoreRepository
+            candidateScoreRepository: candidateScoreRepository,
+            yearScanRepository: yearScanRepository,
+            suppressionRepository: suppressionRepository
         )
     }
 }
