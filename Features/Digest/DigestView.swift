@@ -33,13 +33,20 @@ struct DigestView: View {
         .onChange(of: viewModel.selectedGrouping) { _, _ in
             Task { await viewModel.loadDigest(using: environment.value) }
         }
-        .alert("Error", isPresented: Binding(
+        .onChange(of: viewModel.showOverdueItems) { _, _ in
+            Task { await viewModel.loadDigest(using: environment.value) }
+        }
+        .alert("Couldn't load obligations", isPresented: Binding(
             get: { viewModel.error != nil },
             set: { if !$0 { viewModel.clearError() } }
         )) {
-            Button("OK") { viewModel.clearError() }
+            Button("Try again") {
+                viewModel.clearError()
+                Task { await viewModel.loadDigest(using: environment.value) }
+            }
+            Button("Dismiss", role: .cancel) { viewModel.clearError() }
         } message: {
-            Text(viewModel.error?.localizedDescription ?? "Something went wrong.")
+            Text(viewModel.error?.localizedDescription ?? "Tap Try again to reload your obligations.")
         }
         .overlay(alignment: .bottom) {
             if let banner = viewModel.undoBanner {
@@ -52,10 +59,12 @@ struct DigestView: View {
                 .padding(.bottom, 12)
             }
             if let learning = viewModel.learningBanner {
-                LearningToast(message: learning)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                    .padding(.horizontal)
-                    .padding(.bottom, 52)
+                if viewModel.undoBanner == nil {
+                    LearningToast(message: learning)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .padding(.horizontal)
+                        .padding(.bottom, 12)
+                }
             }
         }
         .animation(.easeInOut, value: viewModel.undoBanner?.id)
@@ -75,18 +84,25 @@ struct DigestView: View {
     }
     
     private var emptyState: some View {
-        ContentUnavailableView(
-            "No action items yet",
-            systemImage: "checkmark.circle",
-            description: Text("Connect Gmail and sync to see important items.")
-        )
+        ContentUnavailableView {
+            Label("No action items yet", systemImage: "checkmark.circle")
+        } description: {
+            Text("Connect Gmail, then sync your inbox to discover obligations.")
+        } actions: {
+            NavigationLink {
+                ConnectGmailView()
+            } label: {
+                Label("Connect Gmail", systemImage: "link")
+            }
+            .buttonStyle(.borderedProminent)
+        }
     }
     
     private var digestList: some View {
         List {
             Section {
                 lensRow
-                groupingRow
+                groupingMenu
             }
             if viewModel.isEmpty {
                 Section {
@@ -95,38 +111,49 @@ struct DigestView: View {
             }
             ForEach(viewModel.sections) { section in
                 Section(header: Text(section.title)) {
-                    ForEach(section.items) { item in
+                    ForEach(Array(section.items.enumerated()), id: \.element.id) { index, item in
                         NavigationLink {
                             ObligationDetailView(
                                 obligation: item.obligation,
+                                state: item.state,
                                 environment: environment.value,
                                 onConfirm: { Task { await viewModel.confirm(item.obligation) } },
                                 onDone: { Task { await viewModel.markDone(item.obligation) } },
                                 onDismiss: { Task { await viewModel.dismiss(item.obligation) } },
                                 onSnooze: { Task { await viewModel.snooze(item.obligation) } },
-                                onBlockSender: { Task { await viewModel.blockSender(item.obligation) } },
-                                onBlockDomain: { Task { await viewModel.blockDomain(item.obligation) } }
+                                onBlockSender: { sender in
+                                    Task { await viewModel.blockSender(item.obligation, senderOverride: sender) }
+                                },
+                                onBlockDomain: { domain in
+                                    Task { await viewModel.blockDomain(item.obligation, domainOverride: domain) }
+                                }
                             )
                         } label: {
-                            DigestRowView(obligation: item.obligation, state: item.state)
+                            DigestRowView(
+                                obligation: item.obligation,
+                                state: item.state,
+                                debugFilterNote: DigestViewModel.digestFilterExplain(
+                                    item.obligation,
+                                    preferences: environment.value.filterPreferencesStore
+                                )
+                            )
+                        }
+                        .onAppear {
+                            Task {
+                                await viewModel.logExposure(
+                                    obligation: item.obligation,
+                                    state: item.state,
+                                    position: index
+                                )
+                            }
                         }
                         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                             Button {
                                 Task { await viewModel.markDone(item.obligation) }
                             } label: {
-                                Label("Done", systemImage: "checkmark")
+                                Label("Mark done", systemImage: "checkmark")
                             }
                             .tint(.green)
-                            Button(role: .destructive) {
-                                Task { await viewModel.dismiss(item.obligation) }
-                            } label: {
-                                Label("Dismiss", systemImage: "eye.slash")
-                            }
-                            Button(role: .destructive) {
-                                Task { await viewModel.blockSender(item.obligation) }
-                            } label: {
-                                Label("Block Sender", systemImage: "hand.raised")
-                            }
                         }
                         .swipeActions(edge: .leading, allowsFullSwipe: true) {
                             Button {
@@ -152,13 +179,29 @@ struct DigestView: View {
         .pickerStyle(.segmented)
     }
 
-    private var groupingRow: some View {
-        Picker("Group", selection: $viewModel.selectedGrouping) {
-            ForEach(ObligationGrouping.allCases) { grouping in
-                Text(grouping.title).tag(grouping)
+    private var groupingMenu: some View {
+        Menu {
+            if viewModel.selectedLens == .active {
+                Toggle(isOn: $viewModel.showOverdueItems) {
+                    Label("Show overdue items", systemImage: viewModel.showOverdueItems ? "eye" : "eye.slash")
+                }
             }
+            ForEach(ObligationGrouping.allCases) { grouping in
+                Button {
+                    viewModel.selectedGrouping = grouping
+                } label: {
+                    if grouping == viewModel.selectedGrouping {
+                        Label(grouping.title, systemImage: "checkmark")
+                    } else {
+                        Text(grouping.title)
+                    }
+                }
+            }
+        } label: {
+            Label("Group by \(viewModel.selectedGrouping.title)", systemImage: "rectangle.3.group")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
         }
-        .pickerStyle(.menu)
     }
 }
 
@@ -202,145 +245,85 @@ private struct LearningToast: View {
 private struct DigestRowView: View {
     let obligation: ObligationItem
     let state: ObligationLifecycleState
+    let debugFilterNote: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            titleText
-            deadlineText
-            reasonChips
-            evidenceText
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(obligation.title)
+                    .font(.subheadline.weight(.semibold))
+                if let statusChipText = primaryStatusChip {
+                    statusChip(statusChipText)
+                }
+            }
+            if let deadline = obligation.deadline {
+                Text(deadlineLabel(for: deadline))
+                    .font(.caption)
+                    .foregroundStyle(deadlineColor(for: deadline))
+            }
+            if let supportingText = supportingLineText {
+                Text(supportingText)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(2)
+            }
+#if DEBUG
+            if let debugFilterNote, !debugFilterNote.isEmpty {
+                Text(debugFilterNote)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+#endif
         }
         .padding(.vertical, 4)
     }
-    
-    private var titleText: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(obligation.title)
-                .font(.subheadline.weight(.semibold))
-            if state == .needsReview {
-                Text("Needs Review")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.orange)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(
+
+    private func statusChip(_ chip: String) -> some View {
+        let isOverdue = chip == "Overdue"
+        let isStatus = chip == "Needs Review" || chip == "Due today"
+        return Text(chip)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(isOverdue ? .red : (isStatus ? .orange : .secondary))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(
+                Capsule()
+                    .fill(isOverdue ? Color.clear : (isStatus ? Color.orange.opacity(0.12) : Color.secondary.opacity(0.12)))
+                    .overlay(
                         Capsule()
-                            .fill(Color.orange.opacity(0.12))
+                            .stroke(isOverdue ? Color.red.opacity(0.4) : Color.clear, lineWidth: 1)
                     )
-            }
-            if isToday {
-                Text("Today")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.orange)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(
-                        Capsule()
-                            .fill(Color.orange.opacity(0.12))
-                    )
-            }
-        }
+            )
     }
-    
-    @ViewBuilder
-    private var deadlineText: some View {
+
+    private var primaryStatusChip: String? {
+        if state == .needsReview { return "Needs Review" }
         if let deadline = obligation.deadline {
-            Text(deadlineLabel(for: deadline))
-                .font(.subheadline)
-                .foregroundStyle(deadlineColor(for: deadline))
+            if deadline < Calendar.current.startOfDay(for: Date()) { return "Overdue" }
+            if Calendar.current.isDateInToday(deadline) { return "Due today" }
         }
+        if obligation.reasonCode != .other {
+            return ReasonCatalog.shortChipText(for: obligation.reasonCode)
+        }
+        return nil
     }
-    
-    @ViewBuilder
-    private var evidenceText: some View {
+
+    private var supportingLineText: String? {
         if !obligation.evidenceQuote.isEmpty {
-            Text("\"\(obligation.evidenceQuote)\"")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-                .lineLimit(2)
+            return "\"\(obligation.evidenceQuote)\""
         }
-    }
-
-    @ViewBuilder
-    private var reasonChips: some View {
-        let chips = buildChips()
-        if !chips.isEmpty {
-            HStack(spacing: 6) {
-                ForEach(chips, id: \.self) { chip in
-                    Text(chip)
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(chip == "Overdue" ? .red : .secondary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(
-                            Capsule()
-                                .fill(chip == "Overdue" ? Color.clear : Color.secondary.opacity(0.12))
-                                .overlay(
-                                    Capsule()
-                                        .stroke(chip == "Overdue" ? Color.red.opacity(0.4) : Color.clear, lineWidth: 1)
-                                )
-                        )
-                }
-            }
-        }
-    }
-
-    private func buildChips() -> [String] {
-        var chips: [String] = []
-
-        if let deadline = obligation.deadline {
-            if deadline < Calendar.current.startOfDay(for: Date()) {
-                chips.append("Overdue")
-            }
-            chips.append("Due \(deadline.formatted(date: .abbreviated, time: .omitted))")
-        }
-
-        for reason in obligation.matchedReasons {
-            let label = shortReasonLabel(for: reason)
-            guard !chips.contains(label) else { continue }
-            chips.append(label)
-        }
-
-        if chips.count > 4 {
-            return Array(chips.prefix(4))
-        }
-        return chips
-    }
-
-    private func shortReasonLabel(for reason: String) -> String {
-        let lowercased = reason.lowercased()
-        if lowercased.contains("payment") || lowercased.contains("billing") || lowercased.contains("invoice") {
-            return "Payment"
-        }
-        if lowercased.contains("document") || lowercased.contains("signature") || lowercased.contains("form") {
-            return "Document"
-        }
-        if lowercased.contains("attachment") {
-            return "Attachment"
-        }
-        if lowercased.contains("appointment") || lowercased.contains("meeting") || lowercased.contains("travel") {
-            return "Appointment"
-        }
-        if lowercased.contains("request") || lowercased.contains("action") {
-            return "Request"
-        }
-        if lowercased.contains("policy") || lowercased.contains("renewal") || lowercased.contains("insurance") {
-            return "Policy"
-        }
-        if lowercased.contains("date") {
-            return "Date"
-        }
-        return reason.count > 14 ? String(reason.prefix(14)) + "…" : reason
+        guard let firstReason = obligation.matchedReasons.first else { return nil }
+        return DigestReasonLabeler.shortReasonLabel(for: firstReason)
     }
 
     private func deadlineLabel(for deadline: Date) -> String {
         if Calendar.current.isDateInToday(deadline) {
-            return "Today"
+            return "Due today"
         }
         if deadline < Calendar.current.startOfDay(for: Date()) {
             return "Overdue • \(deadline.formatted(date: .abbreviated, time: .omitted))"
         }
-        return deadline.formatted(date: .abbreviated, time: .shortened)
+        return "Due \(deadline.formatted(date: .abbreviated, time: .shortened))"
     }
 
     private func deadlineColor(for deadline: Date) -> Color {
@@ -353,24 +336,24 @@ private struct DigestRowView: View {
         return .secondary
     }
 
-    private var isToday: Bool {
-        guard let deadline = obligation.deadline else { return false }
-        return Calendar.current.isDateInToday(deadline)
-    }
 }
 
 private struct ObligationDetailView: View {
     let obligation: ObligationItem
+    let state: ObligationLifecycleState
     let environment: AppEnvironment
     let onConfirm: () -> Void
     let onDone: () -> Void
     let onDismiss: () -> Void
     let onSnooze: () -> Void
-    let onBlockSender: () -> Void
-    let onBlockDomain: () -> Void
+    let onBlockSender: (String) -> Void
+    let onBlockDomain: (String) -> Void
     @State private var message: MessageRecord?
     @State private var account: MailboxAccountRecord?
     @State private var showFullMessage = false
+    @State private var showDismissConfirmation = false
+    @State private var showBlockSenderConfirmation = false
+    @State private var showBlockDomainConfirmation = false
     @Environment(\.openURL) private var openURL
     @Environment(\.dismiss) private var dismiss
 
@@ -395,25 +378,50 @@ private struct ObligationDetailView: View {
                 }
             }
 
+#if DEBUG
+            Section("Filter diagnostics") {
+                Text(
+                    DigestViewModel.digestFilterExplain(
+                        obligation,
+                        preferences: environment.filterPreferencesStore
+                    )
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+#endif
+
             if !obligation.matchedReasons.isEmpty {
-                Section("Why we think this matters") {
+                Section("Why this matters") {
+                    if obligation.reasonCode != .other {
+                        Text(ReasonCatalog.displayText(for: obligation.reasonCode))
+                    }
                     ForEach(Array(obligation.matchedReasons.enumerated()), id: \.offset) { _, reason in
-                        Text(shortReasonLabel(for: reason))
+                        let label = DigestReasonLabeler.shortReasonLabel(for: reason)
+                        if obligation.reasonCode == .other || label != ReasonCatalog.shortChipText(for: obligation.reasonCode) {
+                            Text(label)
+                        }
                     }
                 }
             }
 
-            if let messageBody = displayMessageText {
+            if let detailText = detailMessageText {
                 Section("Email") {
-                    Text(messageBody)
+                    Text(showFullMessage ? detailText.full : detailText.preview)
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .lineLimit(showFullMessage ? nil : 8)
+                        .fixedSize(horizontal: false, vertical: showFullMessage)
                         .textSelection(.enabled)
-                    if fullMessageText != nil {
+                    if canExpandMessage(preview: detailText.preview, expanded: detailText.full) {
                         Button(showFullMessage ? "Show less" : "Show full message") {
                             showFullMessage.toggle()
                         }
+                    }
+                    if detailText.isTruncated {
+                        Text("Message content truncated for performance. Open in provider for full content.")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
                     }
                 }
             }
@@ -433,24 +441,39 @@ private struct ObligationDetailView: View {
                     }
                 }
             }
-
-            if let sender = message?.fromEmail {
-                Section("Block") {
-                    Button("Block sender (\(sender))") {
-                        onBlockSender()
-                    }
-                    if let domain = message?.fromDomain, !domain.isEmpty {
-                        Button("Block domain (\(domain))") {
-                            onBlockDomain()
-                        }
-                    }
-                }
-            }
         }
         .navigationTitle("Obligation")
         .navigationBarTitleDisplayMode(.inline)
         .safeAreaInset(edge: .bottom) {
             actionBar
+        }
+        .confirmationDialog("Dismiss item?", isPresented: $showDismissConfirmation, titleVisibility: .visible) {
+            Button("Mark as not an obligation", role: .destructive) {
+                performAction(onDismiss)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("We'll remove this from your active obligations and treat it as a false positive.")
+        }
+        .confirmationDialog("Block sender?", isPresented: $showBlockSenderConfirmation, titleVisibility: .visible) {
+            if let sender = message?.fromEmail {
+                Button("Block \(sender)", role: .destructive) {
+                    performAction { onBlockSender(sender) }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("All future messages from this sender will be suppressed.")
+        }
+        .confirmationDialog("Block domain?", isPresented: $showBlockDomainConfirmation, titleVisibility: .visible) {
+            if let domain = message?.fromDomain, !domain.isEmpty {
+                Button("Block \(domain)", role: .destructive) {
+                    performAction { onBlockDomain(domain) }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("All future messages from this domain will be suppressed.")
         }
         .task {
             message = try? await environment.messageRepository.fetchByPk(obligation.messagePk)
@@ -462,22 +485,48 @@ private struct ObligationDetailView: View {
 
     private var actionBar: some View {
         HStack(spacing: 12) {
-            Button("Confirm") { performAction(onConfirm) }
-                .buttonStyle(.borderedProminent)
-            Button("Done") { performAction(onDone) }
-                .buttonStyle(.bordered)
-            Button(role: .destructive) {
-                performAction(onDismiss)
-            } label: {
-                Text("Dismiss")
+            Button(primaryCTALabel) {
+                performAction(primaryCTAAction)
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.borderedProminent)
             Button("Snooze") { performAction(onSnooze) }
                 .buttonStyle(.bordered)
+            Menu {
+                Button(role: .destructive) {
+                    showDismissConfirmation = true
+                } label: {
+                    Label("Not an obligation", systemImage: "eye.slash")
+                }
+                if let sender = message?.fromEmail {
+                    Button(role: .destructive) {
+                        showBlockSenderConfirmation = true
+                    } label: {
+                        Label("Block sender (\(sender))", systemImage: "hand.raised")
+                    }
+                }
+                if let domain = message?.fromDomain, !domain.isEmpty {
+                    Button(role: .destructive) {
+                        showBlockDomainConfirmation = true
+                    } label: {
+                        Label("Block domain (\(domain))", systemImage: "network")
+                    }
+                }
+            } label: {
+                Label("More", systemImage: "ellipsis.circle")
+            }
+            .buttonStyle(.bordered)
         }
         .padding(.horizontal)
         .padding(.vertical, 8)
         .background(.ultraThinMaterial)
+    }
+
+    private var primaryCTALabel: String {
+        state == .needsReview ? "Confirm" : "Mark done"
+    }
+
+    private var primaryCTAAction: () -> Void {
+        state == .needsReview ? onConfirm : onDone
     }
 
     private func performAction(_ action: () -> Void) {
@@ -485,53 +534,22 @@ private struct ObligationDetailView: View {
         dismiss()
     }
 
-    private func shortReasonLabel(for reason: String) -> String {
-        let lowercased = reason.lowercased()
-        if lowercased.contains("payment") || lowercased.contains("billing") || lowercased.contains("invoice") {
-            return "Payment"
-        }
-        if lowercased.contains("document") || lowercased.contains("signature") || lowercased.contains("form") {
-            return "Document"
-        }
-        if lowercased.contains("attachment") {
-            return "Attachment"
-        }
-        if lowercased.contains("appointment") || lowercased.contains("meeting") || lowercased.contains("travel") {
-            return "Appointment"
-        }
-        if lowercased.contains("request") || lowercased.contains("action") {
-            return "Request"
-        }
-        if lowercased.contains("policy") || lowercased.contains("renewal") || lowercased.contains("insurance") {
-            return "Policy"
-        }
-        if lowercased.contains("date") {
-            return "Date"
-        }
-        return reason
-    }
-
-    private var messageBodyText: String? {
-        TextSanitizer.sanitizeMessage(
+    private var detailMessageText: TextSanitizer.DetailText? {
+        TextSanitizer.sanitizeDetailMessage(
             bodyText: message?.bodyText,
             bodyHtml: message?.bodyHtml,
             snippet: message?.snippet
         )
     }
 
-    private var fullMessageText: String? {
-        TextSanitizer.sanitizeMessagePreservingNewlines(
-            bodyText: message?.bodyText,
-            bodyHtml: message?.bodyHtml,
-            snippet: message?.snippet
-        )
-    }
-
-    private var displayMessageText: String? {
-        if showFullMessage {
-            return fullMessageText ?? messageBodyText
+    private func canExpandMessage(preview: String, expanded: String) -> Bool {
+        let normalizedPreview = preview.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedExpanded = expanded.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedPreview.isEmpty, !normalizedExpanded.isEmpty else { return false }
+        if normalizedExpanded != normalizedPreview {
+            return true
         }
-        return messageBodyText
+        return normalizedExpanded.contains("\n")
     }
 
     private var providerMessageURL: URL? {
@@ -556,5 +574,55 @@ private struct ObligationDetailView: View {
             return "Open in Gmail"
         }
         return "Open in Mail"
+    }
+}
+
+private enum DigestReasonLabeler {
+    static func shortReasonLabel(for reason: String) -> String {
+        let normalized = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowercased = normalized.lowercased()
+
+        // First prefer canonical reason text mappings.
+        let explicitCode = ReasonCatalog.code(from: normalized)
+        if explicitCode != .other {
+            return ReasonCatalog.shortChipText(for: explicitCode)
+        }
+        if lowercased.contains("delivery") || lowercased.contains("package") || lowercased.contains("shipment") {
+            return "Delivery"
+        }
+        if lowercased.contains("appointment") || lowercased.contains("meeting") || lowercased.contains("travel") {
+            return "Appointment"
+        }
+        if lowercased.contains("verify") || lowercased.contains("identity") || lowercased.contains("account") {
+            return "Verify"
+        }
+        if lowercased.contains("legal") || lowercased.contains("compliance") || lowercased.contains("court") || lowercased.contains("irs") {
+            return "Legal"
+        }
+        if lowercased.contains("waiting") || lowercased.contains("awaiting") {
+            return "Follow-up"
+        }
+        if lowercased.contains("request") || lowercased.contains("action") {
+            return "Request"
+        }
+        if lowercased.contains("deadline") || lowercased.contains("due") {
+            return "Deadline"
+        }
+        if lowercased.contains("payment") || lowercased.contains("billing") || lowercased.contains("invoice") {
+            return "Payment"
+        }
+        if lowercased.contains("document") || lowercased.contains("signature") || lowercased.contains("form") {
+            return "Document"
+        }
+        if lowercased.contains("security") || lowercased.contains("sign-in") {
+            return "Security"
+        }
+        if lowercased.contains("receipt") || lowercased.contains("confirmation") {
+            return "Receipt"
+        }
+        if lowercased.contains("promo") || lowercased.contains("marketing") || lowercased.contains("newsletter") {
+            return "Marketing"
+        }
+        return normalized.count > 14 ? String(normalized.prefix(14)) + "…" : normalized
     }
 }

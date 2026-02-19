@@ -14,6 +14,7 @@ protocol YearScanRepositorying: Sendable {
         coverageSummary: String
     ) async throws
     func fetchLatest() async throws -> YearScanSnapshot?
+    func clearState() async throws
 }
 
 final class YearScanRepository: YearScanRepositorying, @unchecked Sendable {
@@ -86,6 +87,13 @@ final class YearScanRepository: YearScanRepositorying, @unchecked Sendable {
                 updatedAt: Date()
             )
             try state.save(db)
+        }
+    }
+
+    func clearState() async throws {
+        try await database.writeAsync { db in
+            _ = try YearScanResultRecord.deleteAll(db)
+            _ = try YearScanStateRecord.deleteAll(db)
         }
     }
 }

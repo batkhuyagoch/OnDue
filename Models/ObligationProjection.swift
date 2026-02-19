@@ -40,6 +40,8 @@ struct ObligationProjectionRecord: Identifiable, Hashable, Codable, FetchableRec
     var dueBucket: ObligationDueBucket
     var primaryThreadId: String?
     var lastActionAt: Date?
+    var reasonCode: String?
+    var policyVersion: String?
     var updatedAt: Date
 
     var id: String { obligationId }

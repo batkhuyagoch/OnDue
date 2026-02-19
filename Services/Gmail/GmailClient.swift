@@ -55,13 +55,91 @@ final class GmailClient: GmailClienting, @unchecked Sendable {
     private let baseURL = "https://gmail.googleapis.com/gmail/v1"
     private let authService: GmailAuthServicing
     static var maxTotalMessagesPerSlice: Int = 100_000
-    
+
+    // MARK: - Quota protection
+    private static let maxRetries = 5
+    private static let baseBackoffSeconds: Double = 1.0
+    private static let maxBackoffSeconds: Double = 60.0
+    private static let pacingDelayBetweenBatches: UInt64 = 100_000_000  // 100ms
+    private static let pacingDelayBetweenSlices: UInt64 = 200_000_000   // 200ms
+
     init(authService: GmailAuthServicing = GmailAuthService.shared) {
         self.authService = authService
     }
 
     private func log(_ message: String, fields: [String: CustomStringConvertible] = [:]) {
         AppLog.debug(message, fields: fields)
+    }
+
+    /// Performs a Gmail API request with bounded retries, exponential backoff + jitter,
+    /// and honoring Retry-After for 429/5xx and transient network errors.
+    private func performGmailRequest(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        var lastError: Error?
+        for attempt in 0...Self.maxRetries {
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    throw GmailClientError.invalidResponse
+                }
+                if httpResponse.statusCode == 200 {
+                    return (data, httpResponse)
+                }
+                let errorMessage = String(data: data, encoding: .utf8) ?? "Unknown error"
+                if Self.isRetryableStatusCode(httpResponse.statusCode) {
+                    lastError = GmailClientError.apiError(httpResponse.statusCode, errorMessage)
+                    if attempt < Self.maxRetries {
+                        let retryAfter = httpResponse.value(forHTTPHeaderField: "Retry-After")
+                        let delay = Self.computeBackoffDelay(attempt: attempt, retryAfter: retryAfter)
+                        AppLog.debug(
+                            "GmailClient.retry",
+                            fields: ["attempt": attempt + 1, "statusCode": httpResponse.statusCode, "delaySeconds": delay]
+                        )
+                        try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                        continue
+                    }
+                }
+                throw GmailClientError.apiError(httpResponse.statusCode, errorMessage)
+            } catch let error as GmailClientError {
+                throw error
+            } catch {
+                lastError = error
+                if attempt < Self.maxRetries && Self.isTransientNetworkError(error) {
+                    let delay = Self.computeBackoffDelay(attempt: attempt, retryAfter: nil)
+                    AppLog.debug(
+                        "GmailClient.retry.network",
+                        fields: ["attempt": attempt + 1, "delaySeconds": delay]
+                    )
+                    try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                    continue
+                }
+                throw GmailClientError.networkError(error)
+            }
+        }
+        throw lastError ?? GmailClientError.invalidResponse
+    }
+
+    private static func isRetryableStatusCode(_ code: Int) -> Bool {
+        code == 429 || (code >= 500 && code < 600)
+    }
+
+    private static func isTransientNetworkError(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        return nsError.domain == NSURLErrorDomain && (
+            nsError.code == NSURLErrorTimedOut ||
+            nsError.code == NSURLErrorNetworkConnectionLost ||
+            nsError.code == NSURLErrorNotConnectedToInternet ||
+            nsError.code == NSURLErrorInternationalRoamingOff
+        )
+    }
+
+    private static func computeBackoffDelay(attempt: Int, retryAfter: String?) -> Double {
+        if let raw = retryAfter?.trimmingCharacters(in: .whitespaces), !raw.isEmpty,
+           let seconds = Double(raw) {
+            return min(max(seconds, 1), maxBackoffSeconds)
+        }
+        let exponential = baseBackoffSeconds * pow(2.0, Double(attempt))
+        let jitter = Double.random(in: 0...(0.3 * exponential))
+        return min(exponential + jitter, maxBackoffSeconds)
     }
     
     func fetchMessages(daysBack: Int) async throws -> GmailMessageFetchResult {
@@ -117,9 +195,10 @@ final class GmailClient: GmailClienting, @unchecked Sendable {
         guard let accessToken = authService.accessToken else {
             throw GmailClientError.notAuthenticated
         }
-        let summaries = try await fetchMessageSummaries(messageIDs: messageIDs, accessToken: accessToken)
+        let uniqueIds = Array(Set(messageIDs))
+        let summaries = try await fetchMessageSummaries(messageIDs: uniqueIds, accessToken: accessToken)
         return GmailMessageFetchResult(
-            messageIDsCount: messageIDs.count,
+            messageIDsCount: uniqueIds.count,
             summaries: summaries.sorted { $0.receivedAt > $1.receivedAt }
         )
     }
@@ -128,10 +207,14 @@ final class GmailClient: GmailClienting, @unchecked Sendable {
         guard let accessToken = authService.accessToken else {
             throw GmailClientError.notAuthenticated
         }
-        guard !messageIDs.isEmpty else { return [] }
+        let uniqueIds = Array(Set(messageIDs))
+        guard !uniqueIds.isEmpty else { return [] }
         var bodies: [GmailMessageBody] = []
 
-        for batch in messageIDs.chunked(into: 10) {
+        for (idx, batch) in uniqueIds.chunked(into: 10).enumerated() {
+            if idx > 0 {
+                try await Task.sleep(nanoseconds: Self.pacingDelayBetweenBatches)
+            }
             let batchBodies = try await withThrowingTaskGroup(of: GmailMessageBody?.self) { group in
                 for messageID in batch {
                     group.addTask {
@@ -161,16 +244,7 @@ final class GmailClient: GmailClienting, @unchecked Sendable {
         var request = URLRequest(url: URL(string: "\(baseURL)/users/me/profile")!)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw GmailClientError.invalidResponse
-        }
-
-        if httpResponse.statusCode != 200 {
-            let errorMessage = String(data: data, encoding: .utf8) ?? "Unknown error"
-            throw GmailClientError.apiError(httpResponse.statusCode, errorMessage)
-        }
+        let (data, _) = try await performGmailRequest(request)
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         guard let historyId = json?["historyId"] as? String else {
@@ -205,16 +279,7 @@ final class GmailClient: GmailClienting, @unchecked Sendable {
             var request = URLRequest(url: urlComponents.url!)
             request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
 
-            let (data, response) = try await URLSession.shared.data(for: request)
-
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw GmailClientError.invalidResponse
-            }
-
-            if httpResponse.statusCode != 200 {
-                let errorMessage = String(data: data, encoding: .utf8) ?? "Unknown error"
-                throw GmailClientError.apiError(httpResponse.statusCode, errorMessage)
-            }
+            let (data, _) = try await performGmailRequest(request)
 
             let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
             let history = json?["history"] as? [[String: Any]] ?? []
@@ -296,18 +361,9 @@ final class GmailClient: GmailClienting, @unchecked Sendable {
             
             var request = URLRequest(url: urlComponents.url!)
             request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-            
-            let (data, response) = try await URLSession.shared.data(for: request)
-            
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw GmailClientError.invalidResponse
-            }
-            
-            if httpResponse.statusCode != 200 {
-                let errorMessage = String(data: data, encoding: .utf8) ?? "Unknown error"
-                throw GmailClientError.apiError(httpResponse.statusCode, errorMessage)
-            }
-            
+
+            let (data, _) = try await performGmailRequest(request)
+
             let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
             let messages = json?["messages"] as? [[String: Any]] ?? []
             let estimate = json?["resultSizeEstimate"] as? Int ?? -1
@@ -315,6 +371,9 @@ final class GmailClient: GmailClienting, @unchecked Sendable {
             
             pageToken = json?["nextPageToken"] as? String
             pageIndex += 1
+            if pageToken != nil {
+                try await Task.sleep(nanoseconds: Self.pacingDelayBetweenBatches)
+            }
             log(
                 "GmailClient.page",
                 fields: [
@@ -374,8 +433,11 @@ final class GmailClient: GmailClienting, @unchecked Sendable {
                 ]
             )
             for id in sliceIDs { collected.insert(id) }
-            
+
             sliceStart = sliceEnd
+            if sliceStart < endDate {
+                try await Task.sleep(nanoseconds: Self.pacingDelayBetweenSlices)
+            }
         }
         
         return Array(collected)
@@ -386,7 +448,10 @@ final class GmailClient: GmailClienting, @unchecked Sendable {
         var summaries: [GmailMessageSummary] = []
 
         // Process in batches of 10 to avoid rate limits
-        for batch in messageIDs.chunked(into: 10) {
+        for (idx, batch) in messageIDs.chunked(into: 10).enumerated() {
+            if idx > 0 {
+                try await Task.sleep(nanoseconds: Self.pacingDelayBetweenBatches)
+            }
             let batchSummaries = try await withThrowingTaskGroup(of: GmailMessageSummary?.self) { group in
                 for messageID in batch {
                     group.addTask {
@@ -419,23 +484,16 @@ final class GmailClient: GmailClienting, @unchecked Sendable {
         
         var request = URLRequest(url: urlComponents.url!)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-        
-        let (data, response) = try await URLSession.shared.data(for: request)
-        
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw GmailClientError.invalidResponse
-        }
-        
-        if httpResponse.statusCode != 200 {
-            // Skip messages that fail (might be deleted)
+
+        do {
+            let (data, _) = try await performGmailRequest(request)
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return nil
+            }
+            return parseMessage(json)
+        } catch GmailClientError.apiError(let code, _) where code >= 400 && code < 500 {
             return nil
         }
-        
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return nil
-        }
-        
-        return parseMessage(json)
     }
 
     private func fetchMessageBodyDetails(messageID: String, accessToken: String) async throws -> GmailMessageBody? {
@@ -447,33 +505,27 @@ final class GmailClient: GmailClienting, @unchecked Sendable {
         var request = URLRequest(url: urlComponents.url!)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        do {
+            let (data, _) = try await performGmailRequest(request)
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return nil
+            }
+            guard let id = json["id"] as? String else { return nil }
+            let payload = json["payload"] as? [String: Any] ?? [:]
+            let extracted = extractBodyParts(from: payload)
+            guard let bodyText = extracted.bodyText, !bodyText.isEmpty else { return nil }
 
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw GmailClientError.invalidResponse
-        }
-
-        if httpResponse.statusCode != 200 {
+            return GmailMessageBody(
+                messageID: id,
+                bodyText: bodyText,
+                bodyHtml: extracted.bodyHtml,
+                attachmentTypes: extracted.attachmentTypes,
+                hasPdf: extracted.hasPdf,
+                hasCalendar: extracted.hasCalendar
+            )
+        } catch GmailClientError.apiError(let code, _) where code >= 400 && code < 500 {
             return nil
         }
-
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return nil
-        }
-
-        guard let id = json["id"] as? String else { return nil }
-        let payload = json["payload"] as? [String: Any] ?? [:]
-        let extracted = extractBodyParts(from: payload)
-        guard let bodyText = extracted.bodyText, !bodyText.isEmpty else { return nil }
-
-        return GmailMessageBody(
-            messageID: id,
-            bodyText: bodyText,
-            bodyHtml: extracted.bodyHtml,
-            attachmentTypes: extracted.attachmentTypes,
-            hasPdf: extracted.hasPdf,
-            hasCalendar: extracted.hasCalendar
-        )
     }
     
     private func parseMessage(_ json: [String: Any]) -> GmailMessageSummary? {
@@ -557,8 +609,10 @@ final class GmailClient: GmailClienting, @unchecked Sendable {
         let mimeType = payload["mimeType"] as? String
         if let bodyText = decodeBody(payload["body"] as? [String: Any]),
            mimeType == "text/plain" || mimeType == "text/html" {
-            let normalizedText = mimeType == "text/html" ? stripHTML(bodyText) : bodyText
-            let bodyHtml = mimeType == "text/html" ? bodyText : nil
+            let boundedBody = String(bodyText.prefix(EmailContentBudget.htmlPrecleanCharsMax))
+            let cleanedHTML = mimeType == "text/html" ? precleanHTML(boundedBody) : boundedBody
+            let normalizedText = mimeType == "text/html" ? stripHTML(cleanedHTML) : boundedBody
+            let bodyHtml = mimeType == "text/html" ? cleanedHTML : nil
             return (normalizedText, bodyHtml, [], false, false)
         }
 
@@ -581,7 +635,7 @@ final class GmailClient: GmailClienting, @unchecked Sendable {
                 collectAttachmentTypes(from: part, into: &attachmentTypes)
                 let partType = part["mimeType"] as? String
                 if partType == "text/html", let decoded = decodeBody(part["body"] as? [String: Any]) {
-                    htmlText = decoded
+                    htmlText = precleanHTML(String(decoded.prefix(EmailContentBudget.htmlPrecleanCharsMax)))
                     break
                 }
                 if let nestedParts = part["parts"] as? [[String: Any]] {
@@ -593,7 +647,7 @@ final class GmailClient: GmailClienting, @unchecked Sendable {
                             break
                         }
                         if nestedType == "text/html", let decoded = decodeBody(nested["body"] as? [String: Any]) {
-                            htmlText = decoded
+                            htmlText = precleanHTML(String(decoded.prefix(EmailContentBudget.htmlPrecleanCharsMax)))
                         }
                     }
                 }
@@ -639,13 +693,28 @@ final class GmailClient: GmailClienting, @unchecked Sendable {
             base64 += String(repeating: "=", count: padding)
         }
         guard let data = Data(base64Encoded: base64) else { return nil }
-        return String(data: data, encoding: .utf8)
+        let bounded = data.prefix(EmailContentBudget.decodeBytesMax)
+        return String(data: bounded, encoding: .utf8)
     }
 
     private func stripHTML(_ html: String) -> String {
         let withoutTags = html.replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
         let normalized = withoutTags.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
         return normalized.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func precleanHTML(_ html: String) -> String {
+        var cleaned = html
+        let patterns = [
+            "(?is)<style[^>]*>.*?</style>",
+            "(?is)<script[^>]*>.*?</script>",
+            "(?is)<noscript[^>]*>.*?</noscript>",
+            "(?is)<svg[^>]*>.*?</svg>"
+        ]
+        for pattern in patterns {
+            cleaned = cleaned.replacingOccurrences(of: pattern, with: " ", options: .regularExpression)
+        }
+        return cleaned
     }
 }
 

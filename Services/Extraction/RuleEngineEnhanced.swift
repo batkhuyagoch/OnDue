@@ -34,6 +34,32 @@ extension RuleEngine {
                     ])
                 }
             ),
+            Signal(
+                id: "account_change_required",
+                weight: 2.2,
+                reason: "Account update requested",
+                signalType: .keyword,
+                category: .request,
+                matches: { email in
+                    containsAny(email.normalizedText, [
+                        "update your account", "confirm your account details",
+                        "account information required", "profile update required"
+                    ])
+                }
+            ),
+            Signal(
+                id: "delivery_action_required",
+                weight: 2.0,
+                reason: "Delivery requires an action",
+                signalType: .keyword,
+                category: .request,
+                matches: { email in
+                    containsAny(email.normalizedText, [
+                        "confirm delivery", "delivery attempt failed", "reschedule delivery",
+                        "pick up your package", "delivery address issue"
+                    ])
+                }
+            ),
 
             // MARK: Legal & Immigration (authoritative senders)
             Signal(

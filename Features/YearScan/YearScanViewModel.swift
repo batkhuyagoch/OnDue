@@ -21,7 +21,14 @@ final class YearScanViewModel: ObservableObject {
 
     func startScan(using environment: AppEnvironment) {
         guard scanTask == nil else { return }
-        YearScanBackgroundManager.scheduleBackfill()
+        guard environment.syncPolicyStore.longScanAndBackgroundOptIn else {
+            statusMessage = "Enable long scans in Sync Policy to run a 12-month coverage scan."
+            isInProgress = false
+            return
+        }
+        if environment.syncPolicyStore.longScanAndBackgroundOptIn {
+            YearScanBackgroundManager.scheduleBackfill()
+        }
         scanTask = Task {
             await runScan(using: environment)
             scanTask = nil
@@ -89,6 +96,17 @@ final class YearScanViewModel: ObservableObject {
                 lastChecked: lastChecked,
                 coverageSummary: coverageSummary
             )
+        } catch let quotaErr as YearScanQuotaStoppedError {
+            self.error = quotaErr
+            results = []
+            if quotaErr.lastCompletedMonthIndex < 0 {
+                statusMessage = "Stopped before completing month 1 due to API limit. Try again later."
+            } else {
+                let done = quotaErr.lastCompletedMonthIndex + 1
+                statusMessage = "Stopped at month \(done) of \(quotaErr.totalMonths) due to API limit. Try again later."
+            }
+            isInProgress = false
+            Logger.info("YearScan: quota stopped month=\(quotaErr.lastCompletedMonthIndex + 1)/\(quotaErr.totalMonths)")
         } catch {
             self.error = error
             results = []

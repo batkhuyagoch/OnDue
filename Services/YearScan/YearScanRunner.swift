@@ -5,6 +5,11 @@ struct YearScanRunResult {
     let scannedMessageCount: Int
 }
 
+struct YearScanQuotaStoppedError: Error {
+    let lastCompletedMonthIndex: Int
+    let totalMonths: Int
+}
+
 enum YearScanRunner {
     static let coverageSummary = "Inbox, excluding promotions & social"
     private static let scanDays = 365
@@ -27,14 +32,26 @@ enum YearScanRunner {
             var backfillSavedTotal = 0
             let totalMonths = monthRanges.count
             for (index, range) in monthRanges.enumerated() {
+                try Task.checkCancellation()
                 let monthIndex = index + 1
                 statusUpdate?("Backfilling: \(monthLabel(for: range.start)) (\(monthIndex)/\(totalMonths))")
-                let backfillReport = try await environment.gmailSyncCoordinator.backfill(
-                    mailboxAccountId: account.id,
-                    startDate: range.start,
-                    endDate: range.end,
-                    daysBackForExtraction: 0
-                )
+                let backfillReport: SyncReport
+                do {
+                    backfillReport = try await environment.gmailSyncCoordinator.backfill(
+                        mailboxAccountId: account.id,
+                        startDate: range.start,
+                        endDate: range.end,
+                        daysBackForExtraction: 0
+                    )
+                } catch {
+                    if isQuotaRelatedError(error) {
+                        throw YearScanQuotaStoppedError(
+                            lastCompletedMonthIndex: index - 1,
+                            totalMonths: totalMonths
+                        )
+                    }
+                    throw error
+                }
                 backfillSavedTotal += backfillReport.messagesSavedCount
                 Logger.info(
                     "YearScan: backfill slice account=\(account.emailAddress) month=\(monthIndex)/\(totalMonths) saved=\(backfillReport.messagesSavedCount)"
@@ -50,6 +67,7 @@ enum YearScanRunner {
             var bestByThread: [String: YearScanItem] = [:]
 
             while true {
+                try Task.checkCancellation()
                 statusUpdate?("Scanning inbox...")
                 let messages = try await environment.messageRepository.fetchRecentPage(
                     mailboxAccountId: account.id,
@@ -131,5 +149,12 @@ enum YearScanRunner {
         let formatter = DateFormatter()
         formatter.dateFormat = "MMM yyyy"
         return formatter.string(from: date)
+    }
+
+    private static func isQuotaRelatedError(_ error: Error) -> Bool {
+        if case GmailClientError.apiError(let code, _) = error {
+            return code == 429 || code == 403
+        }
+        return false
     }
 }

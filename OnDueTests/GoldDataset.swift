@@ -94,9 +94,9 @@ enum GoldDataset {
                         body: "Receipt included. If there is an issue, contact support.",
                         senderDomain: "receipts.example.com"
                     ),
-                    expectedOutcome: .needsReview,
-                    expectedHypothesis: .userActionRequired,
-                    expectedReason: "Potential follow‑up needed"
+                    expectedOutcome: .reject,
+                    expectedHypothesis: nil,
+                    expectedReason: "Receipt-only email should be blocked"
                 )
             )
         }
@@ -114,6 +114,40 @@ enum GoldDataset {
                     expectedOutcome: .accept,
                     expectedHypothesis: .waitingOnThirdParty,
                     expectedReason: "Waiting on someone else to respond"
+                )
+            )
+        }
+
+        for index in 1...5 {
+            samples.append(
+                GoldDatasetSample(
+                    id: "date_only_info_\(index)",
+                    email: makeEmail(
+                        subject: "Calendar update for April \(index)",
+                        snippet: "Schedule update for April \(index).",
+                        body: "FYI schedule update only. April \(index) is available.",
+                        senderDomain: "calendar.example.com"
+                    ),
+                    expectedOutcome: .reject,
+                    expectedHypothesis: nil,
+                    expectedReason: "Date-only informational emails should not trigger obligations"
+                )
+            )
+        }
+
+        for index in 1...5 {
+            samples.append(
+                GoldDatasetSample(
+                    id: "urgency_only_promo_\(index)",
+                    email: makeEmail(
+                        subject: "Urgent: final hours for offer \(index)",
+                        snippet: "Act now, limited time offer. Unsubscribe anytime.",
+                        body: "Final hours. Act now and save big. Unsubscribe here.",
+                        labelIds: ["category_promotions"]
+                    ),
+                    expectedOutcome: .reject,
+                    expectedHypothesis: nil,
+                    expectedReason: "Urgency-only promo should remain blocked"
                 )
             )
         }

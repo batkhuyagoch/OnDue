@@ -20,3 +20,9 @@ refresh (best-effort).
 This repo contains a lightweight SwiftUI structure intended to be opened
 in Xcode and wired to actual frameworks (SQLite/GRDB, OAuth, background
 refresh) as the next step.
+
+## Documentation
+- Project docs are centralized in `Docs/`.
+- Start with `Docs/README.md`.
+- Architecture decisions live in `Docs/adr/`.
+- App submission readiness checklist lives in `Docs/APP_STORE_CHECKLIST.md`.

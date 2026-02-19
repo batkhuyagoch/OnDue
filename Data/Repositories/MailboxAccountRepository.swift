@@ -9,6 +9,7 @@ protocol MailboxAccountRepositorying: Sendable {
     func fetchAll() async throws -> [MailboxAccountRecord]
     func updateSyncStatus(id: String, status: MailboxAccountRecord.SyncStatus, error: String?) async throws
     func updateSyncMetadata(id: String, gmailLastHistoryId: String?, lastFullSyncAt: Date?) async throws
+    func delete(id: String) async throws
 }
 
 final class MailboxAccountRepository: MailboxAccountRepositorying, @unchecked Sendable {
@@ -89,6 +90,12 @@ final class MailboxAccountRepository: MailboxAccountRepositorying, @unchecked Se
                 """,
                 arguments: [gmailLastHistoryId, lastFullSyncAt, id]
             )
+        }
+    }
+
+    func delete(id: String) async throws {
+        _ = try await database.writeAsync { db in
+            try MailboxAccountRecord.deleteOne(db, key: ["id": id])
         }
     }
 }

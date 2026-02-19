@@ -39,6 +39,10 @@ struct CandidateSelector: CandidateSelecting {
     private let shippingKeywords = [
         "shipped", "out for delivery", "delivered", "tracking", "shipment", "package"
     ]
+    private let deliveryActionKeywords = [
+        "confirm delivery", "delivery attempt failed", "reschedule delivery",
+        "pick up your package", "delivery address issue"
+    ]
 
     init(preferences: FilterPreferencesStoring, suppressionRepository: SuppressionRepositorying? = nil) {
         self.preferences = preferences
@@ -83,7 +87,8 @@ struct CandidateSelector: CandidateSelecting {
             return false
         }
         if preferences.includeShipping == false,
-           shippingKeywords.contains(where: { combined.contains($0) }) {
+           shippingKeywords.contains(where: { combined.contains($0) }) &&
+            !deliveryActionKeywords.contains(where: { combined.contains($0) }) {
             return false
         }
         if message.hasAttachments {

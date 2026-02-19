@@ -25,12 +25,19 @@ final class Database {
     
     init(inMemory: Bool = false) throws {
         var config = Configuration()
-        config.prepareDatabase { db in
-            try db.execute(sql: "PRAGMA journal_mode=WAL")
+        config.foreignKeysEnabled = true
+        if !inMemory {
+            config.prepareDatabase { db in
+                try db.execute(sql: "PRAGMA journal_mode=WAL")
+            }
         }
 
         if inMemory {
-            dbPool = try DatabasePool(path: ":memory:", configuration: config)
+            // DatabasePool requires WAL support, which plain ":memory:" cannot provide.
+            // Use an isolated temp file for tests while preserving inMemory semantics.
+            let tempURL = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("OnDue-Test-\(UUID().uuidString).sqlite")
+            dbPool = try DatabasePool(path: tempURL.path, configuration: config)
         } else {
             let fileManager = FileManager.default
             let appSupportURL = try fileManager.url(

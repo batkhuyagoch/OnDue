@@ -27,6 +27,11 @@ enum YearScanBackgroundManager {
     }
 
     private static func handle(_ task: BGProcessingTask, environment: AppEnvironment) {
+        guard environment.syncPolicyStore.longScanAndBackgroundOptIn else {
+            AppLog.debug("YearScanBackground.skippedNotOptedIn")
+            task.setTaskCompleted(success: true)
+            return
+        }
         scheduleBackfill()
 
         let work = Task {

@@ -32,6 +32,14 @@ enum ObligationHypothesis: String, CaseIterable, Codable {
     case deadlineImplied
     case waitingOnThirdParty
     case legalOrCompliance
+    case accountChangeRequired
+    case paymentFailure
+    case documentExpiration
+    case identityVerification
+    case deliveryRequired
+    case appointmentActionRequired
+    case thirdPartyAwaitingYou
+    case legalComplianceResponse
     case marketingNoise
 }
 
@@ -42,6 +50,478 @@ struct HypothesisDefinition {
     let boosts: [String]
     let blocks: [String]
     let lowWithoutBoost: Bool
+    let reasonTemplate: String
+}
+
+enum RuleEvaluationProfile: String, Codable {
+    case digest
+    case yearScanHighPrecision
+}
+
+enum DecisionPolicyVersion: String, Codable, CaseIterable {
+    case v1StaticBridge = "v1_static_bridge"
+    case v2PolicyDriven = "v2_policy_driven"
+}
+
+enum ReasonCode: String, Codable, CaseIterable {
+    case directRequestWithDeadline = "direct_request_deadline"
+    case directRequestWithoutDeadline = "direct_request_no_deadline"
+    case deadlineMentioned = "deadline_only"
+    case waitingOnThirdParty = "waiting_on_other"
+    case legalCompliance = "legal_compliance"
+    case accountVerification = "account_verification"
+    case deliveryActionRequired = "delivery_action"
+    case appointmentActionRequired = "appointment_action"
+    case securityInformational = "security_informational"
+    case receiptConfirmation = "receipt_confirmation"
+    case marketingPromo = "marketing_promo"
+    case other = "other"
+}
+
+struct DecisionContract: Codable, Hashable {
+    let outcome: ObligationDecision
+    let primaryHypothesisId: String?
+    let reasonCode: ReasonCode
+    let reasonText: String
+    let evidence: [String]
+    let policyVersion: String
+}
+
+enum ReasonCatalog {
+    static func displayText(for reasonCode: ReasonCode) -> String {
+        switch reasonCode {
+        case .directRequestWithDeadline:
+            return "Direct request with a clear deadline"
+        case .directRequestWithoutDeadline:
+            return "Direct request without a deadline"
+        case .deadlineMentioned:
+            return "Deadline mentioned without a request"
+        case .waitingOnThirdParty:
+            return "Waiting on someone else to respond"
+        case .legalCompliance:
+            return "Legal or compliance requirement"
+        case .accountVerification:
+            return "Account or identity verification required"
+        case .deliveryActionRequired:
+            return "Delivery or package action required"
+        case .appointmentActionRequired:
+            return "Appointment action required"
+        case .securityInformational:
+            return "Security alert / informational"
+        case .receiptConfirmation:
+            return "Receipt or confirmation only"
+        case .marketingPromo:
+            return "Marketing / newsletter / promo"
+        case .other:
+            return "Other..."
+        }
+    }
+
+    static var labelingOptions: [String] {
+        [
+            displayText(for: .directRequestWithDeadline),
+            displayText(for: .directRequestWithoutDeadline),
+            displayText(for: .deadlineMentioned),
+            displayText(for: .waitingOnThirdParty),
+            displayText(for: .legalCompliance),
+            displayText(for: .accountVerification),
+            displayText(for: .deliveryActionRequired),
+            displayText(for: .appointmentActionRequired),
+            displayText(for: .securityInformational),
+            displayText(for: .receiptConfirmation),
+            displayText(for: .marketingPromo),
+            displayText(for: .other)
+        ]
+    }
+
+    static func shortChipText(for reasonCode: ReasonCode) -> String {
+        switch reasonCode {
+        case .directRequestWithDeadline, .directRequestWithoutDeadline: return "Request"
+        case .deadlineMentioned: return "Deadline"
+        case .waitingOnThirdParty: return "Follow-up"
+        case .legalCompliance: return "Legal"
+        case .accountVerification: return "Verify"
+        case .deliveryActionRequired: return "Delivery"
+        case .appointmentActionRequired: return "Appointment"
+        case .securityInformational: return "Security"
+        case .receiptConfirmation: return "Receipt"
+        case .marketingPromo: return "Marketing"
+        case .other: return "Other"
+        }
+    }
+
+    static func code(from displayText: String) -> ReasonCode {
+        let normalized = displayText.trimmingCharacters(in: .whitespacesAndNewlines)
+        for code in ReasonCode.allCases where self.displayText(for: code) == normalized {
+            return code
+        }
+        return .other
+    }
+}
+
+struct DecisionPolicy {
+    let version: DecisionPolicyVersion
+
+    init(version: DecisionPolicyVersion = .v2PolicyDriven) {
+        self.version = version
+    }
+
+    func hypothesisDefinitions(for profile: RuleEvaluationProfile) -> [HypothesisDefinition] {
+        let digest = digestDefinitions
+        switch profile {
+        case .digest:
+            return digest
+        case .yearScanHighPrecision:
+            return digest.filter {
+                $0.id == .legalOrCompliance ||
+                $0.id == .paymentFailure ||
+                $0.id == .documentExpiration ||
+                $0.id == .identityVerification ||
+                $0.id == .appointmentActionRequired ||
+                $0.id == .legalComplianceResponse
+            }
+        }
+    }
+
+    func decideOutcome(_ evaluations: [HypothesisEvaluation], profile: RuleEvaluationProfile) -> ObligationDecision {
+        let byHypothesis = Dictionary(uniqueKeysWithValues: evaluations.map { ($0.hypothesis, $0) })
+        let userAction = byHypothesis[.userActionRequired]
+        let deadline = byHypothesis[.deadlineImplied]
+        let waiting = byHypothesis[.waitingOnThirdParty]
+        let legal = byHypothesis[.legalOrCompliance]
+        let paymentFailure = byHypothesis[.paymentFailure]
+        let documentExpiration = byHypothesis[.documentExpiration]
+        let identityVerification = byHypothesis[.identityVerification]
+        let legalComplianceResponse = byHypothesis[.legalComplianceResponse]
+        let delivery = byHypothesis[.deliveryRequired]
+        let appointment = byHypothesis[.appointmentActionRequired]
+        let accountChange = byHypothesis[.accountChangeRequired]
+        let thirdPartyAwaitingYou = byHypothesis[.thirdPartyAwaitingYou]
+
+        if version == .v1StaticBridge {
+            if let legalComplianceResponse, legalComplianceResponse.confidence != .low {
+                return .accept
+            }
+            if let legal, legal.confidence != .low {
+                return .accept
+            }
+            if paymentFailure?.confidence == .high {
+                return .accept
+            }
+            if profile == .yearScanHighPrecision {
+                if documentExpiration?.confidence == .high || identityVerification?.confidence == .high {
+                    return .accept
+                }
+                return .reject
+            }
+            if userAction?.confidence == .high,
+               deadline?.confidence == .high || deadline?.confidence == .medium {
+                return .accept
+            }
+            if waiting?.confidence == .high {
+                return .accept
+            }
+            if userAction?.confidence == .high {
+                return .needsReview
+            }
+            if userAction?.confidence == .medium,
+               deadline?.confidence == .high || deadline?.confidence == .medium {
+                return .needsReview
+            }
+            if deadline?.confidence == .high {
+                return .needsReview
+            }
+            if documentExpiration?.confidence == .medium || identityVerification?.confidence == .medium {
+                return .needsReview
+            }
+            return .reject
+        }
+
+        if let legalComplianceResponse, legalComplianceResponse.confidence != .low {
+            return .accept
+        }
+        if let legal, legal.confidence != .low {
+            return .accept
+        }
+        if paymentFailure?.confidence == .high {
+            return .accept
+        }
+        if profile == .yearScanHighPrecision {
+            if documentExpiration?.confidence == .high || identityVerification?.confidence == .high {
+                return .accept
+            }
+            if appointment?.confidence == .high {
+                return .accept
+            }
+            return .reject
+        }
+
+        if userAction?.confidence == .high,
+           deadline?.confidence == .high || deadline?.confidence == .medium {
+            return .accept
+        }
+
+        if waiting?.confidence == .high {
+            return .accept
+        }
+
+        if delivery?.confidence == .high || appointment?.confidence == .high || accountChange?.confidence == .high {
+            return .needsReview
+        }
+
+        if thirdPartyAwaitingYou?.confidence == .high {
+            return .needsReview
+        }
+
+        if userAction?.confidence == .high {
+            return .needsReview
+        }
+
+        if userAction?.confidence == .medium,
+           deadline?.confidence == .high || deadline?.confidence == .medium {
+            return .needsReview
+        }
+
+        if deadline?.confidence == .high {
+            return .needsReview
+        }
+        if documentExpiration?.confidence == .medium || identityVerification?.confidence == .medium {
+            return .needsReview
+        }
+        if delivery?.confidence == .medium || appointment?.confidence == .medium || accountChange?.confidence == .medium {
+            return .needsReview
+        }
+
+        return .reject
+    }
+
+    var allHypotheses: Set<ObligationHypothesis> {
+        Set(digestDefinitions.map(\.id))
+    }
+
+    var drivingHypotheses: Set<ObligationHypothesis> {
+        [
+            .legalComplianceResponse,
+            .legalOrCompliance,
+            .paymentFailure,
+            .userActionRequired,
+            .deadlineImplied,
+            .waitingOnThirdParty,
+            .documentExpiration,
+            .identityVerification,
+            .deliveryRequired,
+            .appointmentActionRequired,
+            .accountChangeRequired,
+            .thirdPartyAwaitingYou
+        ]
+    }
+
+    private var digestDefinitions: [HypothesisDefinition] {
+        [
+            HypothesisDefinition(
+                id: .userActionRequired,
+                requiresAny: ["request_keyword", "document_keyword", "payment_keyword"],
+                requiresAll: [],
+                boosts: ["direct_address", "attachment_present", "known_sender"],
+                blocks: ["promo_keywords", "receipt_statement", "informational_update"],
+                lowWithoutBoost: false,
+                reasonTemplate: "This asks you to complete something directly."
+            ),
+            HypothesisDefinition(
+                id: .deadlineImplied,
+                requiresAny: ["deadline_keyword", "policy_keyword", "document_expires_soon"],
+                requiresAll: ["date_detected"],
+                boosts: ["deadline_keyword", "date_detected"],
+                blocks: ["promo_urgency", "receipt_statement"],
+                lowWithoutBoost: true,
+                reasonTemplate: "This appears to include a real due date."
+            ),
+            HypothesisDefinition(
+                id: .waitingOnThirdParty,
+                requiresAny: ["waiting_on_phrase"],
+                requiresAll: [],
+                boosts: [],
+                blocks: ["promo_keywords"],
+                lowWithoutBoost: true,
+                reasonTemplate: "This may need follow-up while waiting on someone else."
+            ),
+            HypothesisDefinition(
+                id: .legalOrCompliance,
+                requiresAny: [
+                    "legal_sender_gov_allowlist",
+                    "legal_sender_uscis",
+                    "legal_sender_state",
+                    "legal_sender_ssa",
+                    "legal_sender_irs",
+                    "legal_sender_courts",
+                    "tax_notice",
+                    "court_notice",
+                    "irs_notice",
+                    "jury_duty",
+                    "court_summons",
+                    "passport_renewal"
+                ],
+                requiresAll: [],
+                boosts: ["deadline_keyword", "date_detected"],
+                blocks: [],
+                lowWithoutBoost: false,
+                reasonTemplate: "This looks like an official legal or compliance request."
+            ),
+            HypothesisDefinition(
+                id: .accountChangeRequired,
+                requiresAny: ["account_change_required", "identity_verification", "request_keyword"],
+                requiresAll: [],
+                boosts: ["known_sender", "direct_address", "date_detected"],
+                blocks: ["security_alert", "promo_keywords"],
+                lowWithoutBoost: true,
+                reasonTemplate: "This asks you to update account details."
+            ),
+            HypothesisDefinition(
+                id: .paymentFailure,
+                requiresAny: ["autopay_failed", "past_due", "collections"],
+                requiresAll: [],
+                boosts: ["payment_keyword", "deadline_keyword"],
+                blocks: ["receipt_statement"],
+                lowWithoutBoost: false,
+                reasonTemplate: "A payment issue appears to require action."
+            ),
+            HypothesisDefinition(
+                id: .documentExpiration,
+                requiresAny: ["document_expires_soon", "passport_renewal", "license_renewal"],
+                requiresAll: ["date_detected"],
+                boosts: ["document_keyword"],
+                blocks: ["newsletter", "marketing_language"],
+                lowWithoutBoost: true,
+                reasonTemplate: "A document may expire and need renewal."
+            ),
+            HypothesisDefinition(
+                id: .identityVerification,
+                requiresAny: ["identity_verification", "request_keyword"],
+                requiresAll: [],
+                boosts: ["known_sender", "direct_address"],
+                blocks: ["security_alert", "promo_keywords"],
+                lowWithoutBoost: true,
+                reasonTemplate: "Identity verification appears to be required."
+            ),
+            HypothesisDefinition(
+                id: .deliveryRequired,
+                requiresAny: ["delivery_action_required", "request_keyword"],
+                requiresAll: [],
+                boosts: ["date_detected"],
+                blocks: ["newsletter", "promo_label"],
+                lowWithoutBoost: true,
+                reasonTemplate: "A delivery step may need your attention."
+            ),
+            HypothesisDefinition(
+                id: .appointmentActionRequired,
+                requiresAny: ["medical_appointment", "uscis_biometrics", "uscis_interview", "travel_keyword"],
+                requiresAll: [],
+                boosts: ["date_detected", "request_keyword"],
+                blocks: ["newsletter", "promotional_label"],
+                lowWithoutBoost: true,
+                reasonTemplate: "An appointment likely needs confirmation or preparation."
+            ),
+            HypothesisDefinition(
+                id: .thirdPartyAwaitingYou,
+                requiresAny: ["waiting_on_phrase"],
+                requiresAll: ["request_keyword"],
+                boosts: ["direct_address"],
+                blocks: ["informational_update"],
+                lowWithoutBoost: true,
+                reasonTemplate: "A third party is waiting on your response."
+            ),
+            HypothesisDefinition(
+                id: .legalComplianceResponse,
+                requiresAny: ["legal_notice", "court_notice", "tax_notice", "immigration_deadline", "irs_notice"],
+                requiresAll: ["date_detected"],
+                boosts: ["legal_sender_gov_allowlist", "legal_sender_courts", "legal_sender_irs", "legal_sender_uscis"],
+                blocks: [],
+                lowWithoutBoost: false,
+                reasonTemplate: "An official response appears required by a deadline."
+            ),
+            HypothesisDefinition(
+                id: .marketingNoise,
+                requiresAny: [
+                    "promo_label",
+                    "promo_keywords",
+                    "marketing_language",
+                    "promotional_label",
+                    "newsletter",
+                    "newsletters",
+                    "unsubscribe_footer",
+                    "bulk_sender_hint"
+                ],
+                requiresAll: [],
+                boosts: [],
+                blocks: [],
+                lowWithoutBoost: true,
+                reasonTemplate: "This appears promotional or informational."
+            )
+        ]
+    }
+}
+
+struct HypothesisReviewContext: Hashable, Codable {
+    let senderDomainClass: String
+    let labelCluster: String
+    let threadPattern: String
+}
+
+struct HypothesisReviewCalibrationSnapshot {
+    let needsReviewConfidenceByKey: [String: Double]
+
+    static let empty = HypothesisReviewCalibrationSnapshot(needsReviewConfidenceByKey: [:])
+
+    func confidenceOverride(for hypothesisId: ObligationHypothesis, context: HypothesisReviewContext) -> Double? {
+        let scoped = Self.key(hypothesisId: hypothesisId, context: context)
+        if let scopedValue = needsReviewConfidenceByKey[scoped] {
+            return scopedValue
+        }
+        return needsReviewConfidenceByKey[Self.globalKey(hypothesisId: hypothesisId)]
+    }
+
+    static func key(hypothesisId: ObligationHypothesis, context: HypothesisReviewContext) -> String {
+        [
+            hypothesisId.rawValue,
+            context.senderDomainClass,
+            context.labelCluster,
+            context.threadPattern
+        ].joined(separator: "|")
+    }
+
+    static func globalKey(hypothesisId: ObligationHypothesis) -> String {
+        [hypothesisId.rawValue, "all", "all", "all"].joined(separator: "|")
+    }
+}
+
+struct HypothesisMetricsEvent {
+    let profile: RuleEvaluationProfile
+    let fired: [ObligationHypothesis: Int]
+    let blocked: [ObligationHypothesis: Int]
+    let accepted: [ObligationHypothesis: Int]
+    let review: [ObligationHypothesis: Int]
+    let rejected: Int
+    let blockerBypassSignals: [String]
+
+    var asLogFields: [String: CustomStringConvertible] {
+        [
+            "profile": profile.rawValue,
+            "fired": mapToString(fired),
+            "blocked": mapToString(blocked),
+            "accepted": mapToString(accepted),
+            "review": mapToString(review),
+            "rejected": rejected,
+            "blockerBypassSignals": blockerBypassSignals.joined(separator: ",")
+        ]
+    }
+
+    private func mapToString(_ source: [ObligationHypothesis: Int]) -> String {
+        source
+            .map { ($0.key.rawValue, $0.value) }
+            .sorted { $0.0 < $1.0 }
+            .map { "\($0.0):\($0.1)" }
+            .joined(separator: ",")
+    }
 }
 
 struct HypothesisEvaluation {
@@ -49,6 +529,13 @@ struct HypothesisEvaluation {
     let confidence: HypothesisConfidence
     let reasons: [String]
     let matchedSignals: [String]
+}
+
+struct HypothesisResultSnapshot: Codable, Hashable {
+    let hypothesisId: String
+    let confidence: String
+    let reasons: [String]
+    let matchedSignalIds: [String]
 }
 
 struct HypothesisEvaluationDebug: Codable {
@@ -77,14 +564,20 @@ struct RuleAssessment {
     let confidence: Double
     let evidenceQuote: String
     let deadline: Date?
+    let matchedSignalIds: [String]
     let matchedRuleIds: [String]
     let matchedSignalTypes: [SignalType]
     let matchedReasons: [String]
+    let hypothesisResults: [HypothesisResultSnapshot]
+    let decisionContract: DecisionContract
 }
 
+/// Personalization-agnostic deterministic decision engine.
+/// This type must remain global-policy driven and must not apply user-specific adaptation.
 final class RuleEngine {
     private let preferences: FilterPreferencesStoring
-    private let yearScanThreshold: Double = 2.6
+    private let decisionPolicy: DecisionPolicy
+    private let reviewExplosionThreshold: Int = 4
     private let yearScanHardSignalIds: Set<String> = [
         "past_due",
         "final_notice",
@@ -114,27 +607,61 @@ final class RuleEngine {
         "ssa_notice"
     ]
 
-    init(preferences: FilterPreferencesStoring) {
+    init(preferences: FilterPreferencesStoring, policyVersion: DecisionPolicyVersion = .v2PolicyDriven) {
         self.preferences = preferences
+        self.decisionPolicy = DecisionPolicy(version: policyVersion)
     }
 
     func evaluate(email: ParsedEmail, weightMultipliers: [String: Double] = [:]) -> RuleAssessment? {
-        let assessment = assess(email: email, weightMultipliers: weightMultipliers)
+        let assessment = assess(email: email, weightMultipliers: weightMultipliers, profile: .digest)
         return isAccepted(assessment) ? assessment : nil
     }
 
-    func assess(email: ParsedEmail, weightMultipliers: [String: Double] = [:]) -> RuleAssessment {
-        buildHypothesisAssessment(email: email)
+    func assess(
+        email: ParsedEmail,
+        weightMultipliers: [String: Double] = [:],
+        profile: RuleEvaluationProfile = .digest,
+        reviewCalibration: HypothesisReviewCalibrationSnapshot = .empty
+    ) -> RuleAssessment {
+        let context = reviewContext(for: email)
+        return buildHypothesisAssessment(
+            email: email,
+            profile: profile,
+            reviewCalibration: reviewCalibration,
+            reviewContext: context
+        )
     }
 
     func evaluateYearScan(email: ParsedEmail) -> RuleAssessment? {
+        let assessment = buildHypothesisAssessment(
+            email: email,
+            profile: .yearScanHighPrecision,
+            reviewCalibration: .empty,
+            reviewContext: reviewContext(for: email)
+        )
+        guard assessment.decision == .accept else { return nil }
+        let yearScanHypothesisAllowlist: Set<String> = [
+            ObligationHypothesis.legalOrCompliance.rawValue,
+            ObligationHypothesis.legalComplianceResponse.rawValue,
+            ObligationHypothesis.paymentFailure.rawValue,
+            ObligationHypothesis.documentExpiration.rawValue,
+            ObligationHypothesis.identityVerification.rawValue,
+            ObligationHypothesis.appointmentActionRequired.rawValue
+        ]
+        guard assessment.matchedRuleIds.contains(where: { yearScanHypothesisAllowlist.contains($0) }) else {
+            return nil
+        }
+        return assessment
+    }
+
+    func evaluateYearScanLegacy(email: ParsedEmail) -> RuleAssessment? {
         let assessment = buildAssessment(
             email: email,
             signals: yearScanSignals,
             includeDate: false,
             weightMultipliers: [:]
         )
-        guard assessment.score >= yearScanThreshold else { return nil }
+        guard assessment.score >= 2.6 else { return nil }
         guard assessment.matchedRuleIds.contains(where: { yearScanHardSignalIds.contains($0) }) else { return nil }
         return assessment
     }
@@ -231,13 +758,28 @@ final class RuleEngine {
             confidence: confidence,
             evidenceQuote: evidenceQuote,
             deadline: deadline,
+            matchedSignalIds: matches.map(\.id),
             matchedRuleIds: matches.map(\.id),
             matchedSignalTypes: matches.map(\.signalType),
-            matchedReasons: matches.map(\.reason)
+            matchedReasons: matches.map(\.reason),
+            hypothesisResults: [],
+            decisionContract: DecisionContract(
+                outcome: .accept,
+                primaryHypothesisId: nil,
+                reasonCode: .other,
+                reasonText: ReasonCatalog.displayText(for: .other),
+                evidence: matches.map(\.reason),
+                policyVersion: decisionPolicy.version.rawValue
+            )
         )
     }
 
-    private func buildHypothesisAssessment(email: ParsedEmail) -> RuleAssessment {
+    private func buildHypothesisAssessment(
+        email: ParsedEmail,
+        profile: RuleEvaluationProfile,
+        reviewCalibration: HypothesisReviewCalibrationSnapshot,
+        reviewContext: HypothesisReviewContext
+    ) -> RuleAssessment {
         let matchedSignals = matchSignals(email: email, includeDate: true)
         let matchedIds = Set(matchedSignals.map(\.id))
         let matchedSignalTypes = Array(Set(matchedSignals.map(\.signalType)))
@@ -245,6 +787,14 @@ final class RuleEngine {
         let globalBlockers = matchedSignals.filter { globalBlockerSignalIds.contains($0.id) }
         if !globalBlockers.isEmpty {
             let reasons = uniqueReasons(from: globalBlockers)
+            let contract = DecisionContract(
+                outcome: .reject,
+                primaryHypothesisId: ObligationHypothesis.marketingNoise.rawValue,
+                reasonCode: inferReasonCode(for: .reject, primaryHypothesisId: .marketingNoise, reasons: reasons),
+                reasonText: ReasonCatalog.displayText(for: inferReasonCode(for: .reject, primaryHypothesisId: .marketingNoise, reasons: reasons)),
+                evidence: reasons,
+                policyVersion: decisionPolicy.version.rawValue
+            )
             return RuleAssessment(
                 decision: .reject,
                 score: 0.0,
@@ -253,25 +803,68 @@ final class RuleEngine {
                 confidence: 0.3,
                 evidenceQuote: makeEvidenceQuote(from: email),
                 deadline: DateParsing.parseDate(from: email.normalizedText),
+                matchedSignalIds: matchedSignals.map(\.id),
                 matchedRuleIds: [ObligationHypothesis.marketingNoise.rawValue],
                 matchedSignalTypes: matchedSignalTypes,
-                matchedReasons: reasons
+                matchedReasons: reasons,
+                hypothesisResults: [
+                    HypothesisResultSnapshot(
+                        hypothesisId: ObligationHypothesis.marketingNoise.rawValue,
+                        confidence: HypothesisConfidence.high.rawValue,
+                        reasons: reasons,
+                        matchedSignalIds: matchedSignals.map(\.id).sorted()
+                    )
+                ],
+                decisionContract: contract
             )
         }
 
-        let evaluations = evaluateHypotheses(matchedIds: matchedIds, matchedSignals: matchedSignals)
+        let evaluations = evaluateHypotheses(
+            matchedIds: matchedIds,
+            matchedSignals: matchedSignals,
+            profile: profile
+        )
         emitHypothesisDebug(
             emailId: email.subject,
             matchedIds: matchedIds,
             matchedSignals: matchedSignals,
             evaluations: evaluations
         )
-        let decision = decideOutcome(evaluations)
-        let confidence = confidenceValue(for: decision, evaluations: evaluations)
+        let decision = decideOutcome(evaluations, profile: profile)
+        let confidence = confidenceValue(
+            for: decision,
+            evaluations: evaluations,
+            profile: profile,
+            reviewCalibration: reviewCalibration,
+            reviewContext: reviewContext
+        )
         let reasons = reasonsForOutcome(evaluations)
+        let primaryHypothesis = evaluations
+            .sorted { confidenceRank($0.confidence) > confidenceRank($1.confidence) }
+            .first?.hypothesis
+        let reasonCode = inferReasonCode(
+            for: decision,
+            primaryHypothesisId: primaryHypothesis,
+            reasons: reasons
+        )
+        let decisionContract = DecisionContract(
+            outcome: decision,
+            primaryHypothesisId: primaryHypothesis?.rawValue,
+            reasonCode: reasonCode,
+            reasonText: ReasonCatalog.displayText(for: reasonCode),
+            evidence: reasons,
+            policyVersion: decisionPolicy.version.rawValue
+        )
         let category = determineCategory(from: matchedSignals, evaluations: evaluations)
         let risk = determineRisk(evaluations: evaluations)
         let deadline = DateParsing.parseDate(from: email.normalizedText)
+        emitMetrics(
+            profile: profile,
+            evaluations: evaluations,
+            decision: decision,
+            globalBlockers: globalBlockers,
+            matchedIds: matchedIds
+        )
 
         return RuleAssessment(
             decision: decision,
@@ -281,9 +874,21 @@ final class RuleEngine {
             confidence: confidence,
             evidenceQuote: makeEvidenceQuote(from: email),
             deadline: deadline,
+            matchedSignalIds: Array(matchedIds).sorted(),
             matchedRuleIds: evaluations.map { $0.hypothesis.rawValue },
             matchedSignalTypes: matchedSignalTypes,
-            matchedReasons: reasons
+            matchedReasons: reasons,
+            hypothesisResults: evaluations
+                .map {
+                    HypothesisResultSnapshot(
+                        hypothesisId: $0.hypothesis.rawValue,
+                        confidence: $0.confidence.rawValue,
+                        reasons: $0.reasons,
+                        matchedSignalIds: $0.matchedSignals.sorted()
+                    )
+                }
+                .sorted { $0.hypothesisId < $1.hypothesisId },
+            decisionContract: decisionContract
         )
     }
 
@@ -319,71 +924,8 @@ final class RuleEngine {
         return matched
     }
 
-    private var hypothesisDefinitions: [HypothesisDefinition] {
-        [
-            HypothesisDefinition(
-                id: .userActionRequired,
-                requiresAny: ["request_keyword", "document_keyword", "payment_keyword"],
-                requiresAll: [],
-                boosts: ["direct_address", "attachment_present", "known_sender"],
-                blocks: [],
-                lowWithoutBoost: false
-            ),
-            HypothesisDefinition(
-                id: .deadlineImplied,
-                requiresAny: ["deadline_keyword", "policy_keyword", "document_expires_soon"],
-                requiresAll: ["date_detected"],
-                boosts: ["deadline_keyword", "date_detected"],
-                blocks: [],
-                lowWithoutBoost: true
-            ),
-            HypothesisDefinition(
-                id: .waitingOnThirdParty,
-                requiresAny: ["waiting_on_phrase"],
-                requiresAll: [],
-                boosts: [],
-                blocks: [],
-                lowWithoutBoost: true
-            ),
-            HypothesisDefinition(
-                id: .legalOrCompliance,
-                requiresAny: [
-                    "legal_sender_gov_allowlist",
-                    "legal_sender_uscis",
-                    "legal_sender_state",
-                    "legal_sender_ssa",
-                    "legal_sender_irs",
-                    "legal_sender_courts",
-                    "tax_notice",
-                    "court_notice",
-                    "irs_notice",
-                    "jury_duty",
-                    "court_summons",
-                    "passport_renewal"
-                ],
-                requiresAll: [],
-                boosts: ["deadline_keyword", "date_detected"],
-                blocks: [],
-                lowWithoutBoost: false
-            ),
-            HypothesisDefinition(
-                id: .marketingNoise,
-                requiresAny: [
-                    "promo_label",
-                    "promo_keywords",
-                    "marketing_language",
-                    "promotional_label",
-                    "newsletter",
-                    "newsletters",
-                    "unsubscribe_footer",
-                    "bulk_sender_hint"
-                ],
-                requiresAll: [],
-                boosts: [],
-                blocks: [],
-                lowWithoutBoost: true
-            )
-        ]
+    private func hypothesisDefinitions(for profile: RuleEvaluationProfile) -> [HypothesisDefinition] {
+        decisionPolicy.hypothesisDefinitions(for: profile)
     }
 
     private var globalBlockerSignalIds: Set<String> {
@@ -411,9 +953,10 @@ final class RuleEngine {
 
     private func evaluateHypotheses(
         matchedIds: Set<String>,
-        matchedSignals: [MatchedSignal]
+        matchedSignals: [MatchedSignal],
+        profile: RuleEvaluationProfile
     ) -> [HypothesisEvaluation] {
-        hypothesisDefinitions.compactMap { definition in
+        hypothesisDefinitions(for: profile).compactMap { definition in
             if !definition.requiresAll.allSatisfy({ matchedIds.contains($0) }) {
                 return nil
             }
@@ -440,12 +983,13 @@ final class RuleEngine {
                 definition.boosts.contains(signal.id)
             }
             let reasons = uniqueReasons(from: reasonSignals)
+            let withTemplate = reasons.isEmpty ? [definition.reasonTemplate] : reasons + [definition.reasonTemplate]
             let matched = reasonSignals.map(\.id)
 
             return HypothesisEvaluation(
                 hypothesis: definition.id,
                 confidence: confidence,
-                reasons: reasons,
+                reasons: withTemplate,
                 matchedSignals: matched
             )
         }
@@ -459,7 +1003,7 @@ final class RuleEngine {
     ) {
 #if DEBUG
         let byHypothesis = Dictionary(uniqueKeysWithValues: evaluations.map { ($0.hypothesis, $0) })
-        for definition in hypothesisDefinitions {
+        for definition in hypothesisDefinitions(for: .digest) {
             let requiredAll = definition.requiresAll.reduce(into: [String: Bool]()) { result, id in
                 result[id] = matchedIds.contains(id)
             }
@@ -502,43 +1046,17 @@ final class RuleEngine {
 #endif
     }
 
-    private func decideOutcome(_ evaluations: [HypothesisEvaluation]) -> ObligationDecision {
-        let byHypothesis = Dictionary(uniqueKeysWithValues: evaluations.map { ($0.hypothesis, $0) })
-        let userAction = byHypothesis[.userActionRequired]
-        let deadline = byHypothesis[.deadlineImplied]
-        let waiting = byHypothesis[.waitingOnThirdParty]
-        let legal = byHypothesis[.legalOrCompliance]
-
-        if let legal, legal.confidence != .low {
-            return .accept
-        }
-
-        if userAction?.confidence == .high,
-           deadline?.confidence == .high || deadline?.confidence == .medium {
-            return .accept
-        }
-
-        if waiting?.confidence == .high {
-            return .accept
-        }
-
-        if userAction?.confidence == .high {
-            return .needsReview
-        }
-
-        if userAction?.confidence == .medium,
-           deadline?.confidence == .high || deadline?.confidence == .medium {
-            return .needsReview
-        }
-
-        if deadline?.confidence == .high {
-            return .needsReview
-        }
-
-        return .reject
+    private func decideOutcome(_ evaluations: [HypothesisEvaluation], profile: RuleEvaluationProfile) -> ObligationDecision {
+        decisionPolicy.decideOutcome(evaluations, profile: profile)
     }
 
-    private func confidenceValue(for decision: ObligationDecision, evaluations: [HypothesisEvaluation]) -> Double {
+    private func confidenceValue(
+        for decision: ObligationDecision,
+        evaluations: [HypothesisEvaluation],
+        profile: RuleEvaluationProfile,
+        reviewCalibration: HypothesisReviewCalibrationSnapshot,
+        reviewContext: HypothesisReviewContext
+    ) -> Double {
         let maxConfidence = evaluations.map(\.confidence).sorted(by: { lhs, rhs in
             confidenceRank(lhs) > confidenceRank(rhs)
         }).first
@@ -547,7 +1065,12 @@ final class RuleEngine {
         case .accept:
             return confidenceValue(for: maxConfidence ?? .medium)
         case .needsReview:
-            return confidenceValue(for: .low)
+            guard profile == .digest else { return confidenceValue(for: .low) }
+            guard let primary = evaluations.sorted(by: { confidenceRank($0.confidence) > confidenceRank($1.confidence) }).first else {
+                return confidenceValue(for: .low)
+            }
+            let calibrated = reviewCalibration.confidenceOverride(for: primary.hypothesis, context: reviewContext)
+            return min(max(calibrated ?? confidenceValue(for: .low), 0.45), 0.62)
         case .reject:
             return 0.3
         }
@@ -564,7 +1087,7 @@ final class RuleEngine {
     func confidenceLabel(for email: ParsedEmail) -> String {
         let matchedSignals = matchSignals(email: email, includeDate: true)
         let matchedIds = Set(matchedSignals.map(\.id))
-        let evaluations = evaluateHypotheses(matchedIds: matchedIds, matchedSignals: matchedSignals)
+        let evaluations = evaluateHypotheses(matchedIds: matchedIds, matchedSignals: matchedSignals, profile: .digest)
         let top = evaluations.map(\.confidence).sorted(by: { confidenceRank($0) > confidenceRank($1) }).first
         switch top ?? .low {
         case .high: return "high"
@@ -631,6 +1154,138 @@ final class RuleEngine {
             reasons.append(reason)
         }
         return reasons
+    }
+
+    private func inferReasonCode(
+        for decision: ObligationDecision,
+        primaryHypothesisId: ObligationHypothesis?,
+        reasons: [String]
+    ) -> ReasonCode {
+        let combined = reasons.joined(separator: " ").lowercased()
+        if decision == .reject {
+            if combined.contains("marketing") || combined.contains("promo") || combined.contains("unsubscribe") {
+                return .marketingPromo
+            }
+            if combined.contains("security") || combined.contains("informational") || combined.contains("newsletter") {
+                return .securityInformational
+            }
+            if combined.contains("receipt") || combined.contains("statement") || combined.contains("confirmation") {
+                return .receiptConfirmation
+            }
+        }
+        switch primaryHypothesisId {
+        case .deliveryRequired:
+            return .deliveryActionRequired
+        case .appointmentActionRequired:
+            return .appointmentActionRequired
+        case .accountChangeRequired, .identityVerification:
+            return .accountVerification
+        case .legalOrCompliance, .legalComplianceResponse:
+            return .legalCompliance
+        case .waitingOnThirdParty, .thirdPartyAwaitingYou:
+            return .waitingOnThirdParty
+        case .deadlineImplied:
+            return .deadlineMentioned
+        case .paymentFailure:
+            return .directRequestWithDeadline
+        case .marketingNoise:
+            return .marketingPromo
+        case .userActionRequired:
+            return combined.contains("date") || combined.contains("deadline")
+                ? .directRequestWithDeadline
+                : .directRequestWithoutDeadline
+        case .documentExpiration:
+            return .deadlineMentioned
+        case .none:
+            return .other
+        }
+    }
+
+    private func reviewContext(for email: ParsedEmail) -> HypothesisReviewContext {
+        HypothesisReviewContext(
+            senderDomainClass: senderDomainClass(for: email.senderDomain),
+            labelCluster: labelCluster(for: email.labelIds),
+            threadPattern: threadPattern(for: email.subject)
+        )
+    }
+
+    private func senderDomainClass(for senderDomain: String?) -> String {
+        guard let domain = senderDomain?.lowercased(), !domain.isEmpty else { return "unknown" }
+        let free = ["gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "icloud.com"]
+        if domain.hasSuffix(".gov") || domain.hasSuffix(".mil") { return "government" }
+        if free.contains(domain) { return "consumer" }
+        return "business"
+    }
+
+    private func labelCluster(for labels: [String]) -> String {
+        let normalized = Set(labels.map { $0.lowercased() })
+        if normalized.contains("category_promotions") || normalized.contains("promotions") {
+            return "promotions"
+        }
+        if normalized.contains("category_social") || normalized.contains("social") {
+            return "social"
+        }
+        if normalized.contains("inbox") {
+            return "inbox"
+        }
+        return "other"
+    }
+
+    private func threadPattern(for subject: String) -> String {
+        let normalized = subject.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalized.hasPrefix("re:") || normalized.hasPrefix("fwd:") {
+            return "replyChain"
+        }
+        return "newThread"
+    }
+
+    private func emitMetrics(
+        profile: RuleEvaluationProfile,
+        evaluations: [HypothesisEvaluation],
+        decision: ObligationDecision,
+        globalBlockers: [MatchedSignal],
+        matchedIds: Set<String>
+    ) {
+        var fired: [ObligationHypothesis: Int] = [:]
+        var blocked: [ObligationHypothesis: Int] = [:]
+        var accepted: [ObligationHypothesis: Int] = [:]
+        var review: [ObligationHypothesis: Int] = [:]
+        for evaluation in evaluations {
+            fired[evaluation.hypothesis, default: 0] += 1
+            switch decision {
+            case .accept:
+                accepted[evaluation.hypothesis, default: 0] += 1
+            case .needsReview:
+                review[evaluation.hypothesis, default: 0] += 1
+            case .reject:
+                blocked[evaluation.hypothesis, default: 0] += 1
+            }
+        }
+        let reviewCount = review.values.reduce(0, +)
+        var bypass: [String] = []
+        if !globalBlockers.isEmpty && decision != .reject {
+            bypass = globalBlockers.map(\.id)
+        }
+        if reviewCount >= reviewExplosionThreshold {
+            AppLog.debug(
+                "RuleEngine.reviewExplosionGuard",
+                fields: [
+                    "profile": profile.rawValue,
+                    "reviewCount": reviewCount,
+                    "matchedSignals": matchedIds.sorted().joined(separator: ",")
+                ]
+            )
+        }
+        let event = HypothesisMetricsEvent(
+            profile: profile,
+            fired: fired,
+            blocked: blocked,
+            accepted: accepted,
+            review: review,
+            rejected: decision == .reject ? 1 : 0,
+            blockerBypassSignals: bypass
+        )
+        AppLog.debug("RuleEngine.hypothesisCounters", fields: event.asLogFields)
     }
 
     private var signals: [Signal] {
@@ -837,7 +1492,7 @@ final class RuleEngine {
                 category: nil,
                 matches: { email in
                     containsAny(email.normalizedText, [
-                        "newsletter", "update", "news", "snack", "digest", "weekly roundup",
+                        "newsletter", "weekly update", "product update", "news", "digest", "weekly roundup",
                         "this week in", "latest news"
                     ])
                 }
@@ -945,9 +1600,6 @@ final class RuleEngine {
             )
         }
 
-        // Add enhanced signals for Phase 1
-        base.append(contentsOf: enhancedSignals)
-        
         return base
     }
 

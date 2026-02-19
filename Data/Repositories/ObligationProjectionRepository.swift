@@ -116,6 +116,8 @@ final class ObligationProjectionRepository: ObligationProjectionRepositorying, @
             dueBucket: dueBucket,
             primaryThreadId: primaryThreadId,
             lastActionAt: obligation.updatedAt,
+            reasonCode: obligation.reasonCode,
+            policyVersion: obligation.policyVersion,
             updatedAt: Date()
         )
         try record.save(db)
@@ -162,7 +164,9 @@ final class ObligationProjectionRepository: ObligationProjectionRepositorying, @
         case .snoozed:
             return [.snoozed]
         case .resolved:
-            return [.resolved, .suppressed]
+            // Only completed obligations appear in Resolved.
+            // Suppressed (not-an-obligation) items stay out of this lens.
+            return [.resolved]
         }
     }
 

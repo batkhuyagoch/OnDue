@@ -12,23 +12,30 @@ final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
     private let parser = EmailParser()
     private let ruleEngine: RuleEngine
     private let ruleWeightRepository: RuleWeightRepositorying
+    private let hypothesisReviewCalibrationRepository: HypothesisReviewCalibrationRepositorying
+    private let hypothesisMetricsRepository: HypothesisMetricsRepositorying
     private let candidateScoreRepository: CandidateScoreRepositorying
     private let suppressionRepository: SuppressionRepositorying?
 
     init(
         preferences: FilterPreferencesStoring,
         ruleWeightRepository: RuleWeightRepositorying,
+        hypothesisReviewCalibrationRepository: HypothesisReviewCalibrationRepositorying,
+        hypothesisMetricsRepository: HypothesisMetricsRepositorying,
         candidateScoreRepository: CandidateScoreRepositorying,
         suppressionRepository: SuppressionRepositorying? = nil
     ) {
         self.ruleEngine = RuleEngine(preferences: preferences)
         self.ruleWeightRepository = ruleWeightRepository
+        self.hypothesisReviewCalibrationRepository = hypothesisReviewCalibrationRepository
+        self.hypothesisMetricsRepository = hypothesisMetricsRepository
         self.candidateScoreRepository = candidateScoreRepository
         self.suppressionRepository = suppressionRepository
     }
 
     func extract(from messages: [MessageRecord], mailboxAccountId: String) async throws -> [ObligationRecord] {
         let multipliers = try await ruleWeightRepository.fetchMultipliers(mailboxAccountId: mailboxAccountId)
+        let reviewCalibration = try await hypothesisReviewCalibrationRepository.fetchSnapshot(mailboxAccountId: mailboxAccountId)
         var acceptedByThread: [String: (assessment: RuleAssessment, message: MessageRecord, messagePk: Int64)] = [:]
 
         for message in messages {
@@ -45,10 +52,21 @@ final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
                 }
             }
             let parsedEmail = parser.parse(message: message)
-            let assessment = ruleEngine.assess(email: parsedEmail, weightMultipliers: multipliers)
+            let assessment = ruleEngine.assess(
+                email: parsedEmail,
+                weightMultipliers: multipliers,
+                profile: .digest,
+                reviewCalibration: reviewCalibration
+            )
             let threadKey = message.threadId ?? message.providerMessageId
 
             if ruleEngine.isAccepted(assessment) || ruleEngine.isBorderline(assessment) {
+                try? await hypothesisMetricsRepository.increment(
+                    mailboxAccountId: mailboxAccountId,
+                    profile: .digest,
+                    hypothesisIds: assessment.matchedRuleIds,
+                    counter: ruleEngine.isAccepted(assessment) ? "accepted" : "review"
+                )
                 if let existing = acceptedByThread[threadKey] {
                     if isPreferred(assessment, over: existing.assessment) {
                         acceptedByThread[threadKey] = (assessment, message, pk)
@@ -58,6 +76,12 @@ final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
                 }
                 try? await candidateScoreRepository.delete(messagePk: pk)
             } else {
+                try? await hypothesisMetricsRepository.increment(
+                    mailboxAccountId: mailboxAccountId,
+                    profile: .digest,
+                    hypothesisIds: assessment.matchedRuleIds.isEmpty ? [ObligationHypothesis.marketingNoise.rawValue] : assessment.matchedRuleIds,
+                    counter: "blocked"
+                )
                 try? await candidateScoreRepository.delete(messagePk: pk)
             }
         }
@@ -74,8 +98,14 @@ final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
 
     func assess(message: MessageRecord, mailboxAccountId: String) async throws -> RuleAssessment {
         let multipliers = try await ruleWeightRepository.fetchMultipliers(mailboxAccountId: mailboxAccountId)
+        let reviewCalibration = try await hypothesisReviewCalibrationRepository.fetchSnapshot(mailboxAccountId: mailboxAccountId)
         let parsedEmail = parser.parse(message: message)
-        return ruleEngine.assess(email: parsedEmail, weightMultipliers: multipliers)
+        return ruleEngine.assess(
+            email: parsedEmail,
+            weightMultipliers: multipliers,
+            profile: .digest,
+            reviewCalibration: reviewCalibration
+        )
     }
 
     func makeObligation(
@@ -84,6 +114,15 @@ final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
         mailboxAccountId: String,
         messagePk: Int64
     ) -> ObligationRecord {
+        guard let primaryHypothesisId = assessment.decisionContract.primaryHypothesisId,
+              !primaryHypothesisId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            preconditionFailure("Canonical decision integrity violation: missing primaryHypothesisId for persisted obligation.")
+        }
+        let reasonCode = assessment.decisionContract.reasonCode.rawValue
+        let policyVersion = assessment.decisionContract.policyVersion
+        guard !reasonCode.isEmpty, !policyVersion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            preconditionFailure("Canonical decision integrity violation: missing reasonCode or policyVersion.")
+        }
         let obligationKey = makeObligationKey(
             mailboxAccountId: mailboxAccountId,
             senderDomain: message.fromDomain,
@@ -104,6 +143,9 @@ final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
             matchedRuleIds: assessment.matchedRuleIds.joined(separator: ","),
             matchedSignalTypes: assessment.matchedSignalTypes.map { $0.rawValue }.joined(separator: ","),
             matchedReasons: assessment.matchedReasons.joined(separator: " | "),
+            primaryHypothesisId: primaryHypothesisId,
+            reasonCode: reasonCode,
+            policyVersion: policyVersion,
             repeatCount: 1,
             lastSeenAt: message.internalDate
         )
@@ -125,7 +167,26 @@ final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
                 }
             }
             let parsedEmail = parser.parse(message: message)
-            guard let assessment = ruleEngine.evaluateYearScan(email: parsedEmail) else { continue }
+            let legacy = ruleEngine.evaluateYearScanLegacy(email: parsedEmail)
+            let migrated = ruleEngine.evaluateYearScan(email: parsedEmail)
+            if (legacy != nil) != (migrated != nil) {
+                AppLog.info(
+                    "YearScan.migrationDisagreement",
+                    fields: [
+                        "mailboxAccountId": mailboxAccountId,
+                        "subject": message.subject,
+                        "legacyAccepted": legacy != nil,
+                        "migratedAccepted": migrated != nil
+                    ]
+                )
+            }
+            guard let assessment = migrated else { continue }
+            try? await hypothesisMetricsRepository.increment(
+                mailboxAccountId: mailboxAccountId,
+                profile: .yearScanHighPrecision,
+                hypothesisIds: assessment.matchedRuleIds,
+                counter: "accepted"
+            )
             let threadKey = message.threadId ?? message.providerMessageId
 
             let item = YearScanItem(

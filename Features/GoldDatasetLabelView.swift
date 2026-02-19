@@ -1,9 +1,11 @@
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 struct GoldDatasetLabelView: View {
     @StateObject private var viewModel = GoldDatasetLabelViewModel()
     @State private var showOverride = false
+    @State private var showImporter = false
     @State private var customReason = ""
     @State private var dragOffset: CGSize = .zero
 
@@ -18,6 +20,14 @@ struct GoldDatasetLabelView: View {
             HStack {
                 Text(viewModel.progressText)
                     .font(.subheadline.weight(.semibold))
+                if viewModel.hasUnsavedChanges {
+                    Text("Unsaved changes")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.orange)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(Color.orange.opacity(0.12)))
+                }
                 Spacer()
                 Button("Back") { viewModel.back() }
                     .disabled(viewModel.currentIndex == 0)
@@ -45,6 +55,23 @@ struct GoldDatasetLabelView: View {
             ToolbarItem(placement: .topBarLeading) {
                 Button("Reload") { viewModel.load() }
             }
+            ToolbarItem(placement: .topBarLeading) {
+                Menu {
+                    ForEach(viewModel.availableDatasetFilenames, id: \.self) { filename in
+                        Button(filename) {
+                            viewModel.selectDataset(filename)
+                        }
+                    }
+                } label: {
+                    Label(
+                        viewModel.selectedDatasetFilename.isEmpty ? "Dataset" : viewModel.selectedDatasetFilename,
+                        systemImage: "folder"
+                    )
+                }
+            }
+            ToolbarItem(placement: .topBarLeading) {
+                Button("Import") { showImporter = true }
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Button("Save") { viewModel.save() }
             }
@@ -59,7 +86,16 @@ struct GoldDatasetLabelView: View {
         .sheet(isPresented: $showOverride) {
             overrideSheet
         }
+        .fileImporter(
+            isPresented: $showImporter,
+            allowedContentTypes: [UTType.json],
+            allowsMultipleSelection: false
+        ) { result in
+            guard case let .success(urls) = result, let url = urls.first else { return }
+            viewModel.importDataset(from: url)
+        }
         .onAppear {
+            viewModel.refreshDatasetChoices()
             viewModel.load()
         }
     }
@@ -92,6 +128,10 @@ struct GoldDatasetLabelView: View {
                     .font(.caption.weight(.semibold))
                 Text("Decision: \(item.currentDecision.rawValue)")
                     .font(.caption)
+                if let reasonText = viewModel.canonicalReasonText(for: item) {
+                    Text("Reason: \(reasonText)")
+                        .font(.caption)
+                }
                 if !item.currentHypotheses.isEmpty {
                     Text("Hypotheses: \(item.currentHypotheses.joined(separator: ", "))")
                         .font(.caption)
@@ -135,7 +175,11 @@ struct GoldDatasetLabelView: View {
     }
 
     private func reasonChips(item: GoldDatasetExportItem) -> some View {
-        let chips = Array(Set((item.currentReasons + viewModel.reasonOptions).filter { !$0.isEmpty })).prefix(6)
+        var options = viewModel.reasonOptions.filter { !$0.isEmpty && $0 != "Other..." }
+        if let canonical = viewModel.canonicalReasonText(for: item), !options.contains(canonical) {
+            options.insert(canonical, at: 0)
+        }
+        let chips = Array(options.prefix(6))
         return VStack(alignment: .leading, spacing: 8) {
             Text("Quick reason")
                 .font(.caption.weight(.semibold))
