@@ -33,7 +33,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          SIMULATOR_ID="$(python3 - <<'PY'
+          SIMULATOR_NAME="$(python3 - <<'PY'
           import re
           import subprocess
 
@@ -42,43 +42,43 @@ jobs:
               text=True,
           )
           preferred = ("iPhone 17", "iPhone 16", "iPhone 15", "iPhone 14")
-          selected_id = None
+          selected_name = None
 
           lines = out.splitlines()
           for model in preferred:
               for line in lines:
                   if model not in line:
                       continue
-                  m = re.search(r"\(([0-9A-F-]{36})\)", line)
-                  if m:
-                      selected_id = m.group(1)
+                  if re.search(r"\(([0-9A-F-]{36})\)", line):
+                      selected_name = model
                       break
-              if selected_id:
+              if selected_name:
                   break
 
-          if not selected_id:
+          if not selected_name:
               for line in lines:
                   if "iPhone" not in line:
                       continue
-                  m = re.search(r"\(([0-9A-F-]{36})\)", line)
+                  m = re.search(r"\s*(iPhone[^()]+)\s+\([0-9A-F-]{36}\)", line)
                   if m:
-                      selected_id = m.group(1)
+                      selected_name = m.group(1).strip()
                       break
 
-          if not selected_id:
+          if not selected_name:
               raise SystemExit("No available iPhone simulator found.")
 
-          print(selected_id)
+          print(selected_name)
           PY
           )"
-          echo "simulator_id=${SIMULATOR_ID}" >> "$GITHUB_OUTPUT"
+          echo "simulator_name=${SIMULATOR_NAME}" >> "$GITHUB_OUTPUT"
 
       - name: Run strict gold replay gate
         shell: bash
         run: |
           set -euo pipefail
+          echo "Using simulator: ${{ steps.simulator.outputs.simulator_name }}"
           xcodebuild test \
             -project "OnDue.xcodeproj" \
             -scheme "OnDue" \
-            -destination "id=${{ steps.simulator.outputs.simulator_id }}" \
+            -destination "platform=iOS Simulator,name=${{ steps.simulator.outputs.simulator_name }},OS=latest" \
             -only-testing:"OnDueTests/PolicyReplayHarnessTests/testGoldDatasetV1ReplayGateHasNoHardFailures"
