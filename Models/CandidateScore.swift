@@ -1,6 +1,8 @@
 import Foundation
 import GRDB
 
+/// Deprecated scoring artifact.
+/// Retained for legacy cleanup paths only; do not attach new policy-driven logic.
 struct CandidateScoreRecord: Identifiable, Hashable, Codable, FetchableRecord, PersistableRecord {
     static let databaseTableName = "candidate_score"
 

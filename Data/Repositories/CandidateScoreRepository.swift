@@ -1,6 +1,8 @@
 import Foundation
 import GRDB
 
+/// Deprecated candidate scoring repository.
+/// Retained only for legacy cleanup deletes; do not attach new policy-driven logic.
 protocol CandidateScoreRepositorying: Sendable {
     func delete(messagePk: Int64) async throws
 }

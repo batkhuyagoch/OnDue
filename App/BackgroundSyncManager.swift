@@ -81,6 +81,11 @@ enum BackgroundSyncManager {
         let interval = TimeInterval(environment.syncPolicyStore.backgroundIntervalHours * 60 * 60)
         schedule(earliestInterval: max(interval, 60 * 30))
     }
+
+    static func cancelAllPendingTasks() {
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: taskIdentifier)
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: YearScanBackgroundManager.taskIdentifier)
+    }
 }
 
 enum AppLog {

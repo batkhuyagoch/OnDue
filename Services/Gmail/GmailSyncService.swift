@@ -11,6 +11,58 @@ protocol GmailSyncCoordinating: Sendable {
     func sync(mailboxAccountId: String, daysBack: Int, forceFullSync: Bool) async throws -> SyncReport
     func backfill(mailboxAccountId: String, startDate: Date, endDate: Date, daysBackForExtraction: Int) async throws -> SyncReport
     func resetLocalCache(mailboxAccountId: String) async throws -> Int
+    func deleteAllAccountData(mailboxAccountId: String) async throws
+}
+
+/// Deduplicates inflight body fetches by providerMessageId so concurrent requests for the same ID share a single API call.
+private actor InflightBodyFetchDeduplicator {
+    private var inflightByMessageId: [String: Task<[GmailMessageBody], Error>] = [:]
+    
+    func fetchBodies(
+        messageIDs: [String],
+        via fetch: @escaping @Sendable ([String]) async throws -> [GmailMessageBody]
+    ) async throws -> [GmailMessageBody] {
+        let uniqueIds = Array(Set(messageIDs))
+        var toFetch: [String] = []
+        var tasksToAwait: [Task<[GmailMessageBody], Error>] = []
+        
+        for id in uniqueIds {
+            if let task = inflightByMessageId[id] {
+                tasksToAwait.append(task)
+            } else {
+                toFetch.append(id)
+            }
+        }
+        
+        var results: [GmailMessageBody] = []
+        let resultIds = Set(uniqueIds)
+        
+        if !toFetch.isEmpty {
+            let task = Task { try await fetch(toFetch) }
+            for id in toFetch {
+                inflightByMessageId[id] = task
+            }
+            defer {
+                for id in toFetch {
+                    inflightByMessageId.removeValue(forKey: id)
+                }
+            }
+            let bodies = try await task.value
+            results = bodies.filter { resultIds.contains($0.messageID) }
+        }
+        
+        for t in tasksToAwait {
+            let bodies = try await t.value
+            results.append(contentsOf: bodies.filter { resultIds.contains($0.messageID) })
+        }
+        
+        // Deduplicate by message ID in case multiple IDs point to the same inflight task.
+        var dedupedById: [String: GmailMessageBody] = [:]
+        for body in results {
+            dedupedById[body.messageID] = body
+        }
+        return Array(dedupedById.values)
+    }
 }
 
 final class GmailSyncService: GmailSyncServicing, @unchecked Sendable {
@@ -18,6 +70,7 @@ final class GmailSyncService: GmailSyncServicing, @unchecked Sendable {
     private let client: GmailClienting
     private let messageRepository: MessageRepositorying
     private let candidateSelector: CandidateSelecting
+    private let inflightBodyDeduplicator = InflightBodyFetchDeduplicator()
     
     init(
         database: Database,
@@ -68,7 +121,18 @@ final class GmailSyncService: GmailSyncServicing, @unchecked Sendable {
     
     func incrementalSync(mailboxAccountId: String, startHistoryId: String) async throws -> GmailIncrementalSyncResult {
         let result = try await client.fetchChangedMessageIDs(startHistoryId: startHistoryId)
-        let summariesResult = try await client.fetchMessages(messageIDs: result.messageIDs)
+        let allIds = Array(Set(result.messageIDs))
+        let existingWithBody = try await messageRepository.fetchProviderMessageIdsWithBodyText(
+            mailboxAccountId: mailboxAccountId,
+            providerMessageIds: allIds
+        )
+        let idsToFetch = allIds.filter { !existingWithBody.contains($0) }
+        let summariesResult: GmailMessageFetchResult
+        if idsToFetch.isEmpty {
+            summariesResult = GmailMessageFetchResult(messageIDsCount: result.messageIDs.count, summaries: [])
+        } else {
+            summariesResult = try await client.fetchMessages(messageIDs: idsToFetch)
+        }
 
         let messages = summariesResult.summaries.map {
             Self.makeMessageRecord(
@@ -114,7 +178,10 @@ final class GmailSyncService: GmailSyncServicing, @unchecked Sendable {
         let idsToFetch = candidateIds.filter { !existingWithBody.contains($0) }
         guard !idsToFetch.isEmpty else { return }
 
-        let bodies = try await client.fetchMessageBodies(messageIDs: idsToFetch)
+        let c = client
+        let bodies = try await inflightBodyDeduplicator.fetchBodies(messageIDs: idsToFetch) { ids in
+            try await c.fetchMessageBodies(messageIDs: ids)
+        }
         guard !bodies.isEmpty else { return }
 
         let summaryById = Dictionary(uniqueKeysWithValues: summaries.map { ($0.messageID, $0) })
@@ -168,19 +235,22 @@ final class GmailSyncCoordinator: GmailSyncCoordinating, @unchecked Sendable {
     private let obligationExtractor: ObligationExtracting
     private let obligationRepository: ObligationRepositorying
     private let mailboxAccountRepository: MailboxAccountRepositorying
+    private let yearScanRepository: YearScanRepositorying
 
     init(
         gmailSyncService: GmailSyncServicing,
         messageRepository: MessageRepositorying,
         obligationExtractor: ObligationExtracting,
         obligationRepository: ObligationRepositorying,
-        mailboxAccountRepository: MailboxAccountRepositorying
+        mailboxAccountRepository: MailboxAccountRepositorying,
+        yearScanRepository: YearScanRepositorying
     ) {
         self.gmailSyncService = gmailSyncService
         self.messageRepository = messageRepository
         self.obligationExtractor = obligationExtractor
         self.obligationRepository = obligationRepository
         self.mailboxAccountRepository = mailboxAccountRepository
+        self.yearScanRepository = yearScanRepository
     }
 
     func sync(mailboxAccountId: String, daysBack: Int, forceFullSync: Bool) async throws -> SyncReport {
@@ -314,6 +384,15 @@ final class GmailSyncCoordinator: GmailSyncCoordinating, @unchecked Sendable {
             fields: ["mailboxAccountId": mailboxAccountId, "deleted": deleted]
         )
         return deleted
+    }
+
+    func deleteAllAccountData(mailboxAccountId: String) async throws {
+        try await yearScanRepository.clearState()
+        try await mailboxAccountRepository.delete(id: mailboxAccountId)
+        AppLog.info(
+            "SyncCoordinator.deleteAllAccountData",
+            fields: ["mailboxAccountId": mailboxAccountId]
+        )
     }
 }
 

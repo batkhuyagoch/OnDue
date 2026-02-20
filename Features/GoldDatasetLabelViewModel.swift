@@ -7,36 +7,37 @@ final class GoldDatasetLabelViewModel: ObservableObject {
     @Published private(set) var errorMessage: String?
     @Published private(set) var savePath: String?
     @Published private(set) var savedURL: URL?
+    @Published private(set) var availableDatasetFilenames: [String] = []
+    @Published var selectedDatasetFilename: String = ""
     @Published var searchQuery: String = ""
     @Published private(set) var currentIndex: Int = 0
+    @Published private(set) var hasUnsavedChanges: Bool = false
 
     private var metadata: GoldDatasetMetadata?
     private var sourceFilename: String = GoldDatasetStore.obligationsFilename
+    private var sourceURL: URL?
 
     func load() {
         errorMessage = nil
         savePath = nil
         savedURL = nil
+        hasUnsavedChanges = false
+        refreshDatasetChoices()
 
-        if let stratified = GoldDatasetStore.load(filename: GoldDatasetStore.stratifiedFilename) {
-            metadata = stratified.metadata
-            sourceFilename = GoldDatasetStore.stratifiedFilename
-            items = stratified.items
-        } else if let obligations = GoldDatasetStore.load(filename: GoldDatasetStore.obligationsFilename) {
-            metadata = obligations.metadata
-            sourceFilename = GoldDatasetStore.obligationsFilename
-            items = obligations.items
-        } else if let nearMisses = GoldDatasetStore.load(filename: GoldDatasetStore.nearMissFilename) {
-            metadata = nearMisses.metadata
-            sourceFilename = GoldDatasetStore.nearMissFilename
-            items = nearMisses.items
-        } else {
+        let selected = selectedDatasetFilename.isEmpty ? GoldDatasetStore.defaultDatasetFilename() : selectedDatasetFilename
+        guard let filename = selected, let dataset = GoldDatasetStore.load(filename: filename) else {
             items = []
-        }
-        currentIndex = 0
-        if items.isEmpty {
             errorMessage = "No exported datasets found. Use Settings → Debug to export first."
+            currentIndex = 0
+            return
         }
+        metadata = dataset.metadata
+        sourceFilename = filename
+        sourceURL = nil
+        selectedDatasetFilename = filename
+        GoldDatasetStore.setSelectedDatasetFilename(filename)
+        items = dataset.items
+        currentIndex = min(currentIndex, max(items.count - 1, 0))
     }
 
     func save() {
@@ -46,11 +47,50 @@ final class GoldDatasetLabelViewModel: ObservableObject {
             items: items
         )
         do {
-            let url = try GoldDatasetStore.save(export: export, filename: sourceFilename)
+            let targetFilename = sourceURL?.lastPathComponent ?? sourceFilename
+            let url = try GoldDatasetStore.save(export: export, filename: targetFilename)
             savePath = url.path
             savedURL = url
+            sourceURL = nil
+            sourceFilename = targetFilename
+            selectedDatasetFilename = targetFilename
+            GoldDatasetStore.setSelectedDatasetFilename(targetFilename)
+            refreshDatasetChoices()
+            hasUnsavedChanges = false
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    func importDataset(from url: URL) {
+        errorMessage = nil
+        guard let imported = GoldDatasetStore.load(url: url) else {
+            errorMessage = "Unable to read dataset JSON."
+            return
+        }
+        metadata = imported.metadata
+        items = imported.items
+        currentIndex = 0
+        sourceURL = url
+        sourceFilename = url.lastPathComponent
+        selectedDatasetFilename = sourceFilename
+        savePath = nil
+        savedURL = nil
+        hasUnsavedChanges = false
+    }
+
+    func selectDataset(_ filename: String) {
+        guard !filename.isEmpty else { return }
+        selectedDatasetFilename = filename
+        GoldDatasetStore.setSelectedDatasetFilename(filename)
+        load()
+    }
+
+    func refreshDatasetChoices() {
+        availableDatasetFilenames = GoldDatasetStore.availableDatasetFilenames()
+        if selectedDatasetFilename.isEmpty,
+           let preferred = GoldDatasetStore.defaultDatasetFilename() {
+            selectedDatasetFilename = preferred
         }
     }
 
@@ -100,10 +140,9 @@ final class GoldDatasetLabelViewModel: ObservableObject {
                 $0.expectedHypothesis = item.currentHypotheses.first
             }
             if $0.expectedReason == nil {
-                $0.expectedReason = item.currentReasons.first
+                $0.expectedReason = canonicalReasonText(for: item) ?? item.currentReasons.first
             }
         }
-        save()
         advance()
     }
 
@@ -112,9 +151,8 @@ final class GoldDatasetLabelViewModel: ObservableObject {
         update(item) {
             $0.expectedOutcome = item.currentDecision.rawValue
             $0.expectedHypothesis = item.currentHypotheses.first
-            $0.expectedReason = item.currentReasons.first
+            $0.expectedReason = canonicalReasonText(for: item) ?? item.currentReasons.first
         }
-        save()
         advance()
     }
 
@@ -127,7 +165,6 @@ final class GoldDatasetLabelViewModel: ObservableObject {
                 $0.expectedHypothesis = item.currentHypotheses.first
             }
         }
-        save()
         advance()
     }
 
@@ -140,18 +177,31 @@ final class GoldDatasetLabelViewModel: ObservableObject {
                 "deadlineImplied",
                 "waitingOnThirdParty",
                 "legalOrCompliance",
+                "accountChangeRequired",
+                "paymentFailure",
+                "documentExpiration",
+                "identityVerification",
+                "deliveryRequired",
+                "appointmentActionRequired",
+                "thirdPartyAwaitingYou",
+                "legalComplianceResponse",
                 "marketingNoise"
-            ]
+            ],
+            reasonValues: ReasonCatalog.labelingOptions
         )
     }
 
     func advance() {
         guard !items.isEmpty else { return }
         currentIndex = min(currentIndex + 1, items.count - 1)
+        savePath = nil
+        savedURL = nil
     }
 
     func back() {
         currentIndex = max(currentIndex - 1, 0)
+        savePath = nil
+        savedURL = nil
     }
 
     private func update(_ item: GoldDatasetExportItem, mutate: (inout GoldDatasetExportItem) -> Void) {
@@ -161,6 +211,7 @@ final class GoldDatasetLabelViewModel: ObservableObject {
         var copy = items[index]
         mutate(&copy)
         items[index] = copy
+        hasUnsavedChanges = true
     }
 
     var decisionValues: [String] {
@@ -173,22 +224,27 @@ final class GoldDatasetLabelViewModel: ObservableObject {
             "deadlineImplied",
             "waitingOnThirdParty",
             "legalOrCompliance",
+            "accountChangeRequired",
+            "paymentFailure",
+            "documentExpiration",
+            "identityVerification",
+            "deliveryRequired",
+            "appointmentActionRequired",
+            "thirdPartyAwaitingYou",
+            "legalComplianceResponse",
             "marketingNoise"
         ]
     }
 
     var reasonOptions: [String] {
-        [
-            "Direct request with a clear deadline",
-            "Direct request without a deadline",
-            "Deadline mentioned without a request",
-            "Waiting on someone else to respond",
-            "Legal or compliance requirement",
-            "Security alert / informational",
-            "Receipt or confirmation only",
-            "Marketing / newsletter / promo",
-            "Other..."
-        ]
+        ReasonCatalog.labelingOptions
+    }
+
+    func canonicalReasonText(for item: GoldDatasetExportItem) -> String? {
+        guard let raw = item.currentReasonCode, let code = ReasonCode(rawValue: raw) else {
+            return nil
+        }
+        return ReasonCatalog.displayText(for: code)
     }
 
     func shouldChooseHypothesis(for outcome: String?) -> Bool {

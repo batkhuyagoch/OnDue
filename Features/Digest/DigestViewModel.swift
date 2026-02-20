@@ -18,11 +18,14 @@ final class DigestViewModel: ObservableObject {
     @Published var searchQuery: String = ""
     @Published var selectedLens: ObligationLens = .active
     @Published var selectedGrouping: ObligationGrouping = .dueDate
+    @Published var showOverdueItems: Bool = false
 
     private var pendingUndoTask: Task<Void, Never>?
-    private var pendingWeightTask: Task<Void, Never>?
     private var pendingLearningTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
+    private var currentDigestRenderId: String = UUID().uuidString
+    private var exposureKeysLogged: Set<String> = []
+    private var firstExposureByObligationId: [String: Date] = [:]
     var isEmpty: Bool {
         sections.allSatisfy { $0.items.isEmpty }
     }
@@ -31,6 +34,9 @@ final class DigestViewModel: ObservableObject {
     
     func loadDigest(using environment: AppEnvironment) async {
         self.environment = environment
+        currentDigestRenderId = UUID().uuidString
+        exposureKeysLogged = []
+        firstExposureByObligationId = [:]
         isLoading = true
         error = nil
         defer { isLoading = false }
@@ -51,8 +57,14 @@ final class DigestViewModel: ObservableObject {
                     limit: 200
                 )
             }
-            let filtered = items.filter { Self.shouldInclude($0.obligation, preferences: environment.filterPreferencesStore) }
-            sections = Self.buildSections(from: filtered, grouping: selectedGrouping)
+            let filtered = items.filter { Self.shouldIncludeForDigest($0.obligation, preferences: environment.filterPreferencesStore) }
+            let visibilityFiltered = filtered.filter { item in
+                if selectedLens == .active, showOverdueItems == false, item.dueBucket == .overdue {
+                    return false
+                }
+                return true
+            }
+            sections = Self.buildSections(from: visibilityFiltered, grouping: selectedGrouping)
         } catch {
             self.error = error
             sections = []
@@ -70,7 +82,55 @@ final class DigestViewModel: ObservableObject {
     }
 
     func clearError() {
-        error = nil
+        Task { @MainActor [weak self] in
+            self?.error = nil
+        }
+    }
+
+    func logExposure(
+        obligation: ObligationItem,
+        state: ObligationLifecycleState,
+        position: Int
+    ) async {
+        guard let environment else { return }
+        let dedupeKey = "\(currentDigestRenderId)|\(obligation.id)"
+        guard !exposureKeysLogged.contains(dedupeKey) else { return }
+        exposureKeysLogged.insert(dedupeKey)
+
+        let hypothesisClass = obligation.primaryHypothesisId ?? "unknown"
+        let exposedAt = Date()
+        let record = UserExposureEventRecord(
+            mailboxAccountId: obligation.mailboxAccountId,
+            obligationId: obligation.id,
+            digestRenderId: currentDigestRenderId,
+            hypothesisClass: hypothesisClass,
+            projectionState: state.rawValue,
+            digestPosition: position,
+            exposedAt: exposedAt,
+            policyVersion: obligation.policyVersion
+        )
+        do {
+            let inserted = try await environment.userExposureEventRepository.logFirstExposure(record)
+            if inserted {
+                firstExposureByObligationId[obligation.id] = exposedAt
+                try await environment.hypothesisMetricsRepository.increment(
+                    mailboxAccountId: obligation.mailboxAccountId,
+                    profile: .digest,
+                    hypothesisIds: [hypothesisClass],
+                    counter: "digestExposureCount"
+                )
+                if state == .needsReview {
+                    try await environment.hypothesisMetricsRepository.increment(
+                        mailboxAccountId: obligation.mailboxAccountId,
+                        profile: .digest,
+                        hypothesisIds: [hypothesisClass],
+                        counter: "reviewCount"
+                    )
+                }
+            }
+        } catch {
+            self.error = error
+        }
     }
     
     func snooze(_ obligation: ObligationItem) async {
@@ -80,21 +140,19 @@ final class DigestViewModel: ObservableObject {
         let snoozeUntil = Calendar.current.date(byAdding: .day, value: 1, to: Date()) ?? Date()
         
         do {
-            try await environment.obligationRepository.snooze(id: obligation.id, until: snoozeUntil)
-            try await environment.feedbackRepository.save(
-                FeedbackRecord(
-                    mailboxAccountId: obligation.mailboxAccountId,
-                    messagePk: obligation.messagePk,
-                    obligationId: obligation.id,
-                    action: .snoozed,
-                    reason: "snoozed",
-                    matchedRuleIds: obligation.matchedRuleIds.joined(separator: ",")
-                )
+            let feedback = try await buildFeedbackRecord(
+                obligation: obligation,
+                action: .snoozed,
+                reason: "snoozed",
+                environment: environment
             )
-            try await environment.ruleWeightRepository.applyFeedback(
+            try await environment.obligationRepository.snooze(id: obligation.id, until: snoozeUntil)
+            try await environment.feedbackRepository.save(feedback)
+            try? await environment.hypothesisMetricsRepository.increment(
                 mailboxAccountId: obligation.mailboxAccountId,
-                matchedRuleIds: obligation.matchedRuleIds,
-                action: .snoozed
+                profile: .digest,
+                hypothesisIds: [obligation.primaryHypothesisId ?? "unknown"],
+                counter: "reviewCount"
             )
             showLearningBanner()
             removeFromSections(obligation)
@@ -107,16 +165,35 @@ final class DigestViewModel: ObservableObject {
         guard let environment else { return }
         
         do {
-            try await environment.feedbackRepository.save(
-                FeedbackRecord(
-                    mailboxAccountId: obligation.mailboxAccountId,
-                    messagePk: obligation.messagePk,
-                    obligationId: obligation.id,
-                    action: .dismissed,
-                    reason: "dismissed",
-                    matchedRuleIds: obligation.matchedRuleIds.joined(separator: ",")
-                )
+            let feedback = try await buildFeedbackRecord(
+                obligation: obligation,
+                action: .dismissed,
+                reason: "dismissed",
+                environment: environment
             )
+            try await environment.feedbackRepository.save(feedback)
+            try? await environment.hypothesisMetricsRepository.increment(
+                mailboxAccountId: obligation.mailboxAccountId,
+                profile: .digest,
+                hypothesisIds: [obligation.primaryHypothesisId ?? "unknown"],
+                counter: "digestDismissCount"
+            )
+            if isFastDismiss(obligationId: obligation.id, actionTimestamp: feedback.actionTimestamp) {
+                try? await environment.hypothesisMetricsRepository.increment(
+                    mailboxAccountId: obligation.mailboxAccountId,
+                    profile: .digest,
+                    hypothesisIds: [obligation.primaryHypothesisId ?? "unknown"],
+                    counter: "fastDismissCount"
+                )
+            }
+            if obligation.confidence >= 0.8 {
+                try? await environment.hypothesisMetricsRepository.increment(
+                    mailboxAccountId: obligation.mailboxAccountId,
+                    profile: .digest,
+                    hypothesisIds: [obligation.primaryHypothesisId ?? "unknown"],
+                    counter: "postAcceptCorrectionCount"
+                )
+            }
             try await environment.obligationRepository.dismiss(id: obligation.id)
             removeFromSections(obligation)
             scheduleUndo(for: obligation, action: .dismissed)
@@ -129,20 +206,18 @@ final class DigestViewModel: ObservableObject {
         guard let environment else { return }
 
         do {
-            try await environment.feedbackRepository.save(
-                FeedbackRecord(
-                    mailboxAccountId: obligation.mailboxAccountId,
-                    messagePk: obligation.messagePk,
-                    obligationId: obligation.id,
-                    action: .accepted,
-                    reason: "confirmed",
-                    matchedRuleIds: obligation.matchedRuleIds.joined(separator: ",")
-                )
+            let feedback = try await buildFeedbackRecord(
+                obligation: obligation,
+                action: .accepted,
+                reason: "confirmed",
+                environment: environment
             )
-            try await environment.ruleWeightRepository.applyFeedback(
+            try await environment.feedbackRepository.save(feedback)
+            try? await environment.hypothesisMetricsRepository.increment(
                 mailboxAccountId: obligation.mailboxAccountId,
-                matchedRuleIds: obligation.matchedRuleIds,
-                action: .accepted
+                profile: .digest,
+                hypothesisIds: [obligation.primaryHypothesisId ?? "unknown"],
+                counter: "acceptCount"
             )
             try await environment.obligationRepository.markReviewed(id: obligation.id)
             showLearningBanner()
@@ -158,15 +233,18 @@ final class DigestViewModel: ObservableObject {
         guard let environment else { return }
 
         do {
-            try await environment.feedbackRepository.save(
-                FeedbackRecord(
-                    mailboxAccountId: obligation.mailboxAccountId,
-                    messagePk: obligation.messagePk,
-                    obligationId: obligation.id,
-                    action: .accepted,
-                    reason: "done",
-                    matchedRuleIds: obligation.matchedRuleIds.joined(separator: ",")
-                )
+            let feedback = try await buildFeedbackRecord(
+                obligation: obligation,
+                action: .accepted,
+                reason: "done",
+                environment: environment
+            )
+            try await environment.feedbackRepository.save(feedback)
+            try? await environment.hypothesisMetricsRepository.increment(
+                mailboxAccountId: obligation.mailboxAccountId,
+                profile: .digest,
+                hypothesisIds: [obligation.primaryHypothesisId ?? "unknown"],
+                counter: "acceptCount"
             )
             try await environment.obligationRepository.markDone(id: obligation.id)
             removeFromSections(obligation)
@@ -177,11 +255,22 @@ final class DigestViewModel: ObservableObject {
         }
     }
 
-    func blockSender(_ obligation: ObligationItem) async {
+    func blockSender(_ obligation: ObligationItem, senderOverride: String? = nil) async {
         guard let environment else { return }
         do {
-            guard let message = try await environment.messageRepository.fetchByPk(obligation.messagePk) else { return }
-            let sender = message.fromEmail
+            let sender: String
+            if let senderOverride, !senderOverride.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                sender = senderOverride
+            } else if let message = try await environment.messageRepository.fetchByPk(obligation.messagePk) {
+                sender = message.fromEmail
+            } else {
+                error = NSError(
+                    domain: "OnDue.Digest",
+                    code: 1001,
+                    userInfo: [NSLocalizedDescriptionKey: "Unable to resolve sender for this message."]
+                )
+                return
+            }
             try await environment.suppressionRepository.addSender(
                 mailboxAccountId: obligation.mailboxAccountId,
                 sender: sender
@@ -196,11 +285,33 @@ final class DigestViewModel: ObservableObject {
         }
     }
 
-    func blockDomain(_ obligation: ObligationItem) async {
+    func blockDomain(_ obligation: ObligationItem, domainOverride: String? = nil) async {
         guard let environment else { return }
         do {
-            guard let message = try await environment.messageRepository.fetchByPk(obligation.messagePk) else { return }
-            guard let domain = message.fromDomain, !domain.isEmpty else { return }
+            let domain: String
+            if let domainOverride, !domainOverride.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                domain = domainOverride
+            } else if let message = try await environment.messageRepository.fetchByPk(obligation.messagePk) {
+                if let fromDomain = message.fromDomain, !fromDomain.isEmpty {
+                    domain = fromDomain
+                } else if let extracted = extractDomain(from: message.fromEmail) {
+                    domain = extracted
+                } else {
+                    error = NSError(
+                        domain: "OnDue.Digest",
+                        code: 1002,
+                        userInfo: [NSLocalizedDescriptionKey: "Unable to resolve domain for this message."]
+                    )
+                    return
+                }
+            } else {
+                error = NSError(
+                    domain: "OnDue.Digest",
+                    code: 1002,
+                    userInfo: [NSLocalizedDescriptionKey: "Unable to resolve domain for this message."]
+                )
+                return
+            }
             try await environment.suppressionRepository.addDomain(
                 mailboxAccountId: obligation.mailboxAccountId,
                 domain: domain
@@ -215,6 +326,12 @@ final class DigestViewModel: ObservableObject {
         }
     }
 
+    private func extractDomain(from email: String) -> String? {
+        guard let atIndex = email.lastIndex(of: "@") else { return nil }
+        let domain = String(email[email.index(after: atIndex)...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return domain.isEmpty ? nil : domain
+    }
+
     // MARK: - Private Helpers
     
     private func removeFromSections(_ obligation: ObligationItem) {
@@ -227,25 +344,12 @@ final class DigestViewModel: ObservableObject {
 
     private func scheduleUndo(for obligation: ObligationItem, action: FeedbackRecord.FeedbackAction) {
         pendingUndoTask?.cancel()
-        pendingWeightTask?.cancel()
 
         undoBanner = UndoBanner(
-            message: action == .dismissed ? "Dismissed" : "Marked done",
+            message: action == .dismissed ? "Marked as not an obligation" : "Marked done",
             obligation: obligation,
             action: action
         )
-
-        pendingWeightTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 4_000_000_000)
-            guard let self, let environment = self.environment, let banner = self.undoBanner else { return }
-            try? await environment.ruleWeightRepository.applyFeedback(
-                mailboxAccountId: banner.obligation.mailboxAccountId,
-                matchedRuleIds: banner.obligation.matchedRuleIds,
-                action: banner.action
-            )
-            self.undoBanner = nil
-            self.showLearningBanner()
-        }
 
         pendingUndoTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 4_500_000_000)
@@ -255,7 +359,6 @@ final class DigestViewModel: ObservableObject {
 
     func undoLastAction() async {
         guard let environment, let banner = undoBanner else { return }
-        pendingWeightTask?.cancel()
         pendingUndoTask?.cancel()
         undoBanner = nil
 
@@ -292,7 +395,7 @@ final class DigestViewModel: ObservableObject {
 
     private static func buildDueDateSections(_ items: [ObligationListItem]) -> [ObligationListSection] {
         let grouped = Dictionary(grouping: items) { $0.dueBucket }
-        let orderedBuckets: [ObligationDueBucket] = [.overdue, .today, .next3Days, .next7Days, .later, .noDueDate]
+        let orderedBuckets: [ObligationDueBucket] = [.today, .next3Days, .next7Days, .later, .noDueDate, .overdue]
         return orderedBuckets.compactMap { bucket in
             guard let bucketItems = grouped[bucket], !bucketItems.isEmpty else { return nil }
             let sorted = bucketItems.sorted {
@@ -355,29 +458,42 @@ final class DigestViewModel: ObservableObject {
         return date.formatted(date: .abbreviated, time: .omitted)
     }
 
-    private static func shouldInclude(_ item: ObligationItem, preferences: FilterPreferencesStoring) -> Bool {
+    static func shouldIncludeForDigest(_ item: ObligationItem, preferences: FilterPreferencesStoring) -> Bool {
+        evaluateDigestFilter(item, preferences: preferences).isIncluded
+    }
+
+    static func digestFilterExplain(_ item: ObligationItem, preferences: FilterPreferencesStoring) -> String {
+        evaluateDigestFilter(item, preferences: preferences).debugMessage
+    }
+
+    private static func evaluateDigestFilter(
+        _ item: ObligationItem,
+        preferences: FilterPreferencesStoring
+    ) -> (isIncluded: Bool, debugMessage: String) {
         let combined = ([item.title, item.evidenceQuote] + item.matchedReasons).joined(separator: " ").lowercased()
         let matchedRuleSet = Set(item.matchedRuleIds)
         let matchedReasonSet = Set(item.matchedReasons.map { $0.lowercased() })
-        let matchedSignalSet = Set(item.matchedSignalTypes.map { $0.lowercased() })
+        let reasonCode = item.reasonCode
+        let isDeliveryAction = item.primaryHypothesisId == ObligationHypothesis.deliveryRequired.rawValue || reasonCode == .deliveryActionRequired
+
         if preferences.includeSecurityAlerts == false,
-           (combined.contains("password changed") || combined.contains("sign-in attempt") || combined.contains("security alert")) {
-            return false
+           (reasonCode == .securityInformational
+                || combined.contains("password changed")
+                || combined.contains("sign-in attempt")
+                || combined.contains("security alert")) {
+            return (false, "Excluded: security alerts disabled")
         }
         if preferences.includeStatements == false,
            (combined.contains("statement available") || combined.contains("monthly statement") || combined.contains("account statement")) {
-            return false
+            return (false, "Excluded: statements disabled")
         }
         if preferences.includeMarketing == false {
-            let hasMarketingRule = matchedRuleSet.contains("promo_label")
-                || matchedRuleSet.contains("promo_keywords")
-                || matchedRuleSet.contains("marketing_language")
-                || matchedRuleSet.contains("newsletter")
-                || matchedRuleSet.contains("promotional_label")
+            let hasMarketingRule = matchedRuleSet.contains(ObligationHypothesis.marketingNoise.rawValue)
+            let hasMarketingHypothesis = item.primaryHypothesisId == ObligationHypothesis.marketingNoise.rawValue
             let hasMarketingReason = matchedReasonSet.contains(where: {
                 $0.contains("promotion") || $0.contains("marketing") || $0.contains("newsletter")
             })
-            let hasMarketingSignals = matchedSignalSet.contains("label")
+            let hasMarketingReasonCode = reasonCode == .marketingPromo
             let hasMarketingKeywords = combined.contains("unsubscribe")
                 || combined.contains("sale")
                 || combined.contains("promo")
@@ -385,19 +501,107 @@ final class DigestViewModel: ObservableObject {
                 || combined.contains("offer")
                 || combined.contains("coupon")
                 || combined.contains("shop now")
-            if hasMarketingRule || hasMarketingReason || (hasMarketingSignals && hasMarketingKeywords) {
-                return false
+            if hasMarketingRule || hasMarketingHypothesis || hasMarketingReason || hasMarketingReasonCode || hasMarketingKeywords {
+                return (false, "Excluded: marketing disabled")
             }
         }
         if preferences.includeNewsletters == false,
            (combined.contains("newsletter") || combined.contains("announcement") || combined.contains("roundup")) {
-            return false
+            return (false, "Excluded: newsletters disabled")
         }
-        if preferences.includeShipping == false,
-           (combined.contains("out for delivery") || combined.contains("delivered") || combined.contains("tracking") || combined.contains("shipment")) {
-            return false
+        if preferences.includeShipping == false {
+            if isDeliveryAction {
+                return (true, "Included: delivery action override")
+            }
+            if combined.contains("out for delivery")
+                || combined.contains("delivered")
+                || combined.contains("tracking")
+                || combined.contains("shipment")
+                || combined.contains("package")
+                || combined.contains("shipped") {
+                return (false, "Excluded: shipping updates disabled")
+            }
         }
-        return true
+        return (true, "Included: passes active filters")
+    }
+
+    private func buildFeedbackRecord(
+        obligation: ObligationItem,
+        action: FeedbackRecord.FeedbackAction,
+        reason: String,
+        environment: AppEnvironment
+    ) async throws -> FeedbackRecord {
+        let message = try await environment.messageRepository.fetchByPk(obligation.messagePk)
+        guard let primaryHypothesisId = obligation.primaryHypothesisId,
+              !primaryHypothesisId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw NSError(
+                domain: "OnDue.Digest",
+                code: 1201,
+                userInfo: [NSLocalizedDescriptionKey: "Missing canonical primary hypothesis id."]
+            )
+        }
+        let senderDomain = message?.fromDomain?.lowercased()
+        let senderDomainClass: String
+        if let senderDomain {
+            if senderDomain.hasSuffix(".gov") || senderDomain.hasSuffix(".mil") {
+                senderDomainClass = "government"
+            } else if ["gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "icloud.com"].contains(senderDomain) {
+                senderDomainClass = "consumer"
+            } else {
+                senderDomainClass = "business"
+            }
+        } else {
+            senderDomainClass = "unknown"
+        }
+
+        let labels = Set(
+            (message?.labelIds ?? "")
+                .split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+        )
+        let labelCluster: String
+        if labels.contains("category_promotions") || labels.contains("promotions") {
+            labelCluster = "promotions"
+        } else if labels.contains("category_social") || labels.contains("social") {
+            labelCluster = "social"
+        } else if labels.contains("inbox") {
+            labelCluster = "inbox"
+        } else {
+            labelCluster = "other"
+        }
+
+        let subject = message?.subject.lowercased() ?? obligation.title.lowercased()
+        let threadPattern = subject.hasPrefix("re:") || subject.hasPrefix("fwd:") ? "replyChain" : "newThread"
+        let exposureTimestamp: Date?
+        if let cached = firstExposureByObligationId[obligation.id] {
+            exposureTimestamp = cached
+        } else {
+            exposureTimestamp = try? await environment.userExposureEventRepository.fetchFirstExposureTimestamp(
+                mailboxAccountId: obligation.mailboxAccountId,
+                obligationId: obligation.id
+            )
+        }
+
+        return FeedbackRecord(
+            mailboxAccountId: obligation.mailboxAccountId,
+            messagePk: obligation.messagePk,
+            obligationId: obligation.id,
+            action: action,
+            reason: reason,
+            matchedRuleIds: obligation.matchedRuleIds.joined(separator: ","),
+            primaryHypothesisId: primaryHypothesisId,
+            senderDomainClass: senderDomainClass,
+            labelCluster: labelCluster,
+            threadPattern: threadPattern,
+            exposureTimestamp: exposureTimestamp,
+            actionTimestamp: Date()
+        )
+    }
+
+    private func isFastDismiss(obligationId: String, actionTimestamp: Date?) -> Bool {
+        guard let actionTimestamp,
+              let exposure = firstExposureByObligationId[obligationId] else { return false }
+        return actionTimestamp.timeIntervalSince(exposure) <= 120
     }
 }
 

@@ -10,57 +10,51 @@ struct CoverageStatusView: View {
         List {
             if viewModel.isLoading {
                 Section {
-                    HStack {
-                        Spacer()
-                        ProgressView()
-                        Spacer()
+                    ContentUnavailableView {
+                        Label("Checking coverage", systemImage: "magnifyingglass")
+                    } description: {
+                        Text(viewModel.statusMessage ?? "Scanning your past year for missed bills and renewals.")
                     }
-                    if let status = viewModel.statusMessage {
-                        Text(status)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .center)
-                    }
+                    .symbolRenderingMode(.hierarchical)
                 }
             } else if viewModel.isInProgress {
                 Section {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Coverage check paused")
-                            .font(.subheadline.weight(.semibold))
-                        if let status = viewModel.statusMessage {
-                            Text(status)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        } else {
-                            Text("Resume to continue the coverage check.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
+                    ContentUnavailableView {
+                        Label("Resume coverage check", systemImage: "play.circle")
+                    } description: {
+                        Text(viewModel.statusMessage ?? "Tap below to continue scanning your past year.")
+                    } actions: {
                         Button("Resume check") {
                             viewModel.restartScan(using: environment.value)
                         }
                         .buttonStyle(.borderedProminent)
                     }
-                    .padding(.vertical, 4)
                 }
             } else if viewModel.results.isEmpty {
                 Section {
-                    VStack(alignment: .leading, spacing: 8) {
-                        if viewModel.lastChecked != nil, viewModel.scannedMessageCount == 0 {
-                            Text("No messages to scan yet")
-                                .font(.title3.weight(.semibold))
-                            Text("Connect Gmail and sync to run a safety check over the past year.")
-                                .font(.callout)
-                                .foregroundStyle(.secondary)
-                        } else {
-                            Text("You’re all clear")
-                                .font(.title3.weight(.semibold))
-                            Text("We checked the last 12 months for missed bills, renewals, and official requests. Nothing looks unresolved or risky.")
-                                .font(.callout)
-                                .foregroundStyle(.secondary)
+                    if viewModel.lastChecked != nil, viewModel.scannedMessageCount == 0 {
+                        ContentUnavailableView {
+                            Label("Connect Gmail to run coverage check", systemImage: "envelope.badge")
+                        } description: {
+                            Text("Sync your inbox first, then we'll scan the past year for missed bills and renewals.")
+                        } actions: {
+                            NavigationLink(destination: ConnectGmailView().environmentObject(environment)) {
+                                Label("Connect Gmail", systemImage: "link")
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+                    } else {
+                        ContentUnavailableView {
+                            Label("You're all clear", systemImage: "checkmark.circle")
+                        } description: {
+                            Text("We checked the last 12 months for missed bills, renewals, and official requests. Nothing looks unresolved.")
+                        } actions: {
+                            Button("Recheck now") {
+                                viewModel.restartScan(using: environment.value)
+                            }
+                            .buttonStyle(.borderedProminent)
                         }
                     }
-                    .padding(.vertical, 8)
 
                     DisclosureGroup("Details", isExpanded: $showDetails) {
                         VStack(alignment: .leading, spacing: 6) {
@@ -78,12 +72,16 @@ struct CoverageStatusView: View {
             } else {
                 Section(header: Text(resultsHeader)) {
                     ForEach(viewModel.results) { item in
-                        YearScanRowView(
-                            item: item,
-                            onResolve: { resolve(item) },
-                            onDismiss: { viewModel.dismiss(item) },
-                            onOpen: { open(item) }
-                        )
+                        NavigationLink {
+                            YearScanDetailView(
+                                item: item,
+                                onResolve: { resolve(item) },
+                                onDismiss: { viewModel.dismiss(item) },
+                                onOpen: { open(item) }
+                            )
+                        } label: {
+                            YearScanRowView(item: item)
+                        }
                     }
                 }
             }
@@ -96,13 +94,17 @@ struct CoverageStatusView: View {
                 }
             }
         }
-        .alert("Error", isPresented: Binding(
+        .alert("Coverage check failed", isPresented: Binding(
             get: { viewModel.error != nil },
             set: { if !$0 { viewModel.clearError() } }
         )) {
-            Button("OK") { viewModel.clearError() }
+            Button("Try again") {
+                viewModel.clearError()
+                viewModel.restartScan(using: environment.value)
+            }
+            Button("Dismiss", role: .cancel) { viewModel.clearError() }
         } message: {
-            Text(viewModel.error?.localizedDescription ?? "Something went wrong.")
+            Text(viewModel.error?.localizedDescription ?? "Something went wrong. Tap Try again to rerun the check.")
         }
         .onAppear {
             viewModel.startScan(using: environment.value)
@@ -131,9 +133,6 @@ struct CoverageStatusView: View {
 
 private struct YearScanRowView: View {
     let item: YearScanItem
-    let onResolve: () -> Void
-    let onDismiss: () -> Void
-    let onOpen: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -151,15 +150,67 @@ private struct YearScanRowView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
-            HStack(spacing: 12) {
-                Button("Resolve") { onResolve() }
-                    .buttonStyle(.borderedProminent)
-                Button("Dismiss") { onDismiss() }
-                    .buttonStyle(.bordered)
-                Button("Open in Gmail") { onOpen() }
-                    .buttonStyle(.bordered)
-            }
         }
         .padding(.vertical, 4)
+    }
+}
+
+private struct YearScanDetailView: View {
+    let item: YearScanItem
+    let onResolve: () -> Void
+    let onDismiss: () -> Void
+    let onOpen: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var showDismissConfirmation = false
+
+    var body: some View {
+        List {
+            Section {
+                Text(item.subject)
+                    .font(.title3.weight(.semibold))
+                if !item.snippet.isEmpty {
+                    Text(item.snippet)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if !item.matchedReasons.isEmpty {
+                Section("Why this was flagged") {
+                    ForEach(Array(item.matchedReasons.enumerated()), id: \.offset) { _, reason in
+                        Text(reason)
+                    }
+                }
+            }
+
+            Section("Actions") {
+                Button("Open in Gmail and mark resolved") {
+                    onResolve()
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+
+                Button("Open in Gmail only") {
+                    onOpen()
+                }
+
+                Button(role: .destructive) {
+                    showDismissConfirmation = true
+                } label: {
+                    Text("Dismiss")
+                }
+            }
+        }
+        .navigationTitle("Coverage Item")
+        .navigationBarTitleDisplayMode(.inline)
+        .confirmationDialog("Dismiss this coverage item?", isPresented: $showDismissConfirmation, titleVisibility: .visible) {
+            Button("Dismiss", role: .destructive) {
+                onDismiss()
+                dismiss()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes the item from the coverage results.")
+        }
     }
 }

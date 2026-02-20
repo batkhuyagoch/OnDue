@@ -15,6 +15,8 @@ protocol MessageRepositorying: Sendable {
     func fetchByPk(_ pk: Int64) async throws -> MessageRecord?
     func fetchByProviderMessageId(_ providerMessageId: String) async throws -> MessageRecord?
     func fetchProviderMessageIdsWithBodyText(mailboxAccountId: String, providerMessageIds: [String]) async throws -> Set<String>
+    /// Returns provider message IDs that already exist with body text (fully hydrated). Used to skip summary/body fetches.
+    func fetchProviderMessageIdsWithBody(mailboxAccountId: String, providerMessageIds: Set<String>) async throws -> Set<String>
     func search(query: String, mailboxAccountId: String, limit: Int) async throws -> [MessageRecord]
     func softDeleteOlderThan(mailboxAccountId: String, daysBack: Int) async throws -> Int
     func deleteAll(for mailboxAccountId: String) async throws -> Int
@@ -203,6 +205,16 @@ final class MessageRepository: MessageRepositorying, @unchecked Sendable {
             }
             return Set(collected)
         }
+    }
+
+    func fetchProviderMessageIdsWithBody(
+        mailboxAccountId: String,
+        providerMessageIds: Set<String>
+    ) async throws -> Set<String> {
+        try await fetchProviderMessageIdsWithBodyText(
+            mailboxAccountId: mailboxAccountId,
+            providerMessageIds: Array(providerMessageIds)
+        )
     }
     
     func search(query: String, mailboxAccountId: String, limit: Int) async throws -> [MessageRecord] {

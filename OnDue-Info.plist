@@ -5,6 +5,7 @@
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
 		<string>com.ondue.refresh</string>
+		<string>com.ondue.yearscan</string>
 	</array>
 	<key>CFBundleURLTypes</key>
 	<array>
@@ -16,12 +17,15 @@
 				<string>com.googleusercontent.apps.678995530901-0vqn34j8484p5qhivaiqaofijvjoj38k</string>
 			</array>
 		</dict>
-		<dict/>
 	</array>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>processing</string>
 		<string>fetch</string>
 	</array>
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
 </dict>
 </plist>

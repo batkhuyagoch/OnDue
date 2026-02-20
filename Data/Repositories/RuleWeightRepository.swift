@@ -3,6 +3,7 @@ import GRDB
 
 protocol RuleWeightRepositorying: Sendable {
     func fetchMultipliers(mailboxAccountId: String) async throws -> [String: Double]
+    /// Deprecated legacy feedback mutator. Do not use for policy-driven adaptation.
     func applyFeedback(
         mailboxAccountId: String,
         matchedRuleIds: [String],
@@ -54,6 +55,7 @@ final class RuleWeightRepository: RuleWeightRepositorying, @unchecked Sendable {
         }
     }
 
+    /// Deprecated legacy scoring path. Preserve for backward compatibility only.
     func applyFeedback(
         mailboxAccountId: String,
         matchedRuleIds: [String],

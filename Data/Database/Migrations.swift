@@ -410,5 +410,144 @@ enum Migrations {
             try db.create(index: "obligation_projection_dueDate", on: "obligation_projection", columns: ["dueDate"])
             try db.create(index: "obligation_projection_thread", on: "obligation_projection", columns: ["primaryThreadId"])
         }
+
+        migrator.registerMigration("v15_feedback_hypothesis_context") { db in
+            try db.alter(table: "feedback") { t in
+                t.add(column: "primaryHypothesisId", .text)
+                t.add(column: "senderDomainClass", .text)
+                t.add(column: "labelCluster", .text)
+                t.add(column: "threadPattern", .text)
+            }
+            try db.create(index: "feedback_hypothesis", on: "feedback", columns: ["mailboxAccountId", "primaryHypothesisId"])
+        }
+
+        migrator.registerMigration("v16_hypothesis_review_calibration") { db in
+            try db.create(table: "hypothesis_review_calibration") { t in
+                t.column("id", .text).primaryKey()
+                t.column("mailboxAccountId", .text).notNull()
+                    .references("mailbox_account", column: "id", onDelete: .cascade)
+                t.column("hypothesisId", .text).notNull()
+                t.column("senderDomainClass", .text).notNull().defaults(to: "all")
+                t.column("labelCluster", .text).notNull().defaults(to: "all")
+                t.column("threadPattern", .text).notNull().defaults(to: "all")
+                t.column("acceptedCount", .integer).notNull().defaults(to: 0)
+                t.column("dismissedCount", .integer).notNull().defaults(to: 0)
+                t.column("snoozedCount", .integer).notNull().defaults(to: 0)
+                t.column("updatedAt", .datetime).notNull()
+                t.uniqueKey(["mailboxAccountId", "hypothesisId", "senderDomainClass", "labelCluster", "threadPattern"])
+            }
+            try db.create(
+                index: "hypothesis_review_lookup",
+                on: "hypothesis_review_calibration",
+                columns: ["mailboxAccountId", "hypothesisId", "senderDomainClass", "labelCluster", "threadPattern"]
+            )
+        }
+
+        migrator.registerMigration("v17_hypothesis_metric_counter") { db in
+            try db.create(table: "hypothesis_metric_counter") { t in
+                t.column("id", .text).primaryKey()
+                t.column("mailboxAccountId", .text).notNull()
+                    .references("mailbox_account", column: "id", onDelete: .cascade)
+                t.column("profile", .text).notNull()
+                t.column("hypothesisId", .text).notNull()
+                t.column("counter", .text).notNull()
+                t.column("count", .integer).notNull().defaults(to: 0)
+                t.column("updatedAt", .datetime).notNull()
+                t.uniqueKey(["mailboxAccountId", "profile", "hypothesisId", "counter"])
+            }
+            try db.create(
+                index: "hypothesis_metric_counter_lookup",
+                on: "hypothesis_metric_counter",
+                columns: ["mailboxAccountId", "profile", "hypothesisId", "counter"]
+            )
+        }
+
+        migrator.registerMigration("v18_decision_contract_columns") { db in
+            try db.alter(table: "obligation") { t in
+                t.add(column: "primaryHypothesisId", .text)
+                t.add(column: "reasonCode", .text)
+                t.add(column: "policyVersion", .text)
+            }
+            try db.alter(table: "obligation_projection") { t in
+                t.add(column: "reasonCode", .text)
+                t.add(column: "policyVersion", .text)
+            }
+            try db.create(index: "obligation_reason_code", on: "obligation", columns: ["reasonCode"])
+            try db.create(index: "obligation_policy_version", on: "obligation", columns: ["policyVersion"])
+        }
+
+        migrator.registerMigration("v19_exposure_and_feedback_timestamps") { db in
+            try db.create(table: "user_exposure_event") { t in
+                t.column("id", .text).primaryKey()
+                t.column("mailboxAccountId", .text).notNull()
+                    .references("mailbox_account", column: "id", onDelete: .cascade)
+                t.column("obligationId", .text).notNull()
+                    .references("obligation", column: "id", onDelete: .cascade)
+                t.column("digestRenderId", .text).notNull()
+                t.column("hypothesisClass", .text).notNull()
+                t.column("projectionState", .text).notNull()
+                t.column("digestPosition", .integer).notNull().defaults(to: 0)
+                t.column("exposedAt", .datetime).notNull()
+                t.column("policyVersion", .text).notNull()
+                t.uniqueKey(["mailboxAccountId", "obligationId", "digestRenderId"])
+            }
+            try db.create(
+                index: "user_exposure_mailbox_obligation",
+                on: "user_exposure_event",
+                columns: ["mailboxAccountId", "obligationId", "exposedAt"]
+            )
+            try db.create(
+                index: "user_exposure_hypothesis",
+                on: "user_exposure_event",
+                columns: ["mailboxAccountId", "hypothesisClass", "exposedAt"]
+            )
+
+            try db.alter(table: "feedback") { t in
+                t.add(column: "exposureTimestamp", .datetime)
+                t.add(column: "actionTimestamp", .datetime)
+            }
+        }
+
+        migrator.registerMigration("v20_counter_integrity_and_diff_artifact") { db in
+            try db.execute(sql: """
+                CREATE TABLE policy_diff_artifact (
+                    id TEXT NOT NULL PRIMARY KEY,
+                    datasetId TEXT NOT NULL,
+                    baselineVersion TEXT NOT NULL,
+                    candidateVersion TEXT NOT NULL,
+                    decisionDeltaPercent DOUBLE NOT NULL,
+                    generatedAt DATETIME NOT NULL
+                );
+            """)
+            try db.create(
+                index: "policy_diff_artifact_versions",
+                on: "policy_diff_artifact",
+                columns: ["baselineVersion", "candidateVersion", "generatedAt"]
+            )
+        }
+
+        migrator.registerMigration("v21_backfill_canonical_decision_fields") { db in
+            try db.execute(sql: """
+                UPDATE obligation
+                SET primaryHypothesisId = COALESCE(NULLIF(primaryHypothesisId, ''), 'userActionRequired')
+            """)
+            try db.execute(sql: """
+                UPDATE obligation
+                SET reasonCode = COALESCE(NULLIF(reasonCode, ''), 'other')
+            """)
+            try db.execute(sql: """
+                UPDATE obligation
+                SET policyVersion = COALESCE(NULLIF(policyVersion, ''), 'v2_policy_driven')
+            """)
+
+            try db.execute(sql: """
+                UPDATE obligation_projection
+                SET reasonCode = COALESCE(NULLIF(reasonCode, ''), 'other')
+            """)
+            try db.execute(sql: """
+                UPDATE obligation_projection
+                SET policyVersion = COALESCE(NULLIF(policyVersion, ''), 'v2_policy_driven')
+            """)
+        }
     }
 }

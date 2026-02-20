@@ -14,9 +14,9 @@ protocol ObligationRepositorying: Sendable {
     func dismissBySender(mailboxAccountId: String, sender: String) async throws
     func dismissByDomain(mailboxAccountId: String, domain: String) async throws
     func promoteManually(
-        messageId: String,
+        message: MessageRecord,
         mailboxAccountId: String,
-        environment: AppEnvironment
+        assessment: RuleAssessment
     ) async throws -> ObligationItem
 }
 
@@ -65,6 +65,7 @@ final class ObligationRepository: ObligationRepositorying, @unchecked Sendable {
     }
     
     func save(_ record: ObligationRecord) async throws {
+        try record.validateCanonicalDecisionInvariants()
         try await database.writeAsync { db in
             try record.save(db)
             try self.projectionRepository?.upsert(obligation: record, in: db)
@@ -143,6 +144,7 @@ final class ObligationRepository: ObligationRepositorying, @unchecked Sendable {
                         }
                     }
 
+                    try record.validateCanonicalDecisionInvariants()
                     try record.save(db)
                     try self.projectionRepository?.upsert(obligation: record, in: db)
                 }
@@ -233,6 +235,8 @@ final class ObligationRepository: ObligationRepositorying, @unchecked Sendable {
     }
 
     func dismissBySender(mailboxAccountId: String, sender: String) async throws {
+        let normalizedSender = sender.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalizedSender.isEmpty else { return }
         try await database.writeAsync { db in
             try db.execute(
                 sql: """
@@ -242,7 +246,7 @@ final class ObligationRepository: ObligationRepositorying, @unchecked Sendable {
                       AND messagePk IN (
                         SELECT pk FROM message
                         WHERE mailboxAccountId = ?
-                          AND fromEmail = ?
+                          AND LOWER(TRIM(fromEmail)) = ?
                       )
                 """,
                 arguments: [
@@ -251,7 +255,7 @@ final class ObligationRepository: ObligationRepositorying, @unchecked Sendable {
                     Date(),
                     mailboxAccountId,
                     mailboxAccountId,
-                    sender
+                    normalizedSender
                 ]
             )
             try db.execute(
@@ -264,7 +268,7 @@ final class ObligationRepository: ObligationRepositorying, @unchecked Sendable {
                         JOIN message m ON m.pk = o.messagePk
                         WHERE o.mailboxAccountId = ?
                           AND m.mailboxAccountId = ?
-                          AND m.fromEmail = ?
+                          AND LOWER(TRIM(m.fromEmail)) = ?
                     )
                 """,
                 arguments: [
@@ -273,13 +277,15 @@ final class ObligationRepository: ObligationRepositorying, @unchecked Sendable {
                     Date(),
                     mailboxAccountId,
                     mailboxAccountId,
-                    sender
+                    normalizedSender
                 ]
             )
         }
     }
 
     func dismissByDomain(mailboxAccountId: String, domain: String) async throws {
+        let normalizedDomain = domain.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalizedDomain.isEmpty else { return }
         try await database.writeAsync { db in
             try db.execute(
                 sql: """
@@ -289,7 +295,7 @@ final class ObligationRepository: ObligationRepositorying, @unchecked Sendable {
                       AND messagePk IN (
                         SELECT pk FROM message
                         WHERE mailboxAccountId = ?
-                          AND fromDomain = ?
+                          AND LOWER(TRIM(fromDomain)) = ?
                       )
                 """,
                 arguments: [
@@ -298,7 +304,7 @@ final class ObligationRepository: ObligationRepositorying, @unchecked Sendable {
                     Date(),
                     mailboxAccountId,
                     mailboxAccountId,
-                    domain
+                    normalizedDomain
                 ]
             )
             try db.execute(
@@ -311,7 +317,7 @@ final class ObligationRepository: ObligationRepositorying, @unchecked Sendable {
                         JOIN message m ON m.pk = o.messagePk
                         WHERE o.mailboxAccountId = ?
                           AND m.mailboxAccountId = ?
-                          AND m.fromDomain = ?
+                          AND LOWER(TRIM(m.fromDomain)) = ?
                     )
                 """,
                 arguments: [
@@ -320,7 +326,7 @@ final class ObligationRepository: ObligationRepositorying, @unchecked Sendable {
                     Date(),
                     mailboxAccountId,
                     mailboxAccountId,
-                    domain
+                    normalizedDomain
                 ]
             )
         }
@@ -369,6 +375,9 @@ extension ObligationRepository {
                 matchedRuleIds: ["deadline_keyword", "date_detected"],
                 matchedSignalTypes: ["keyword", "date"],
                 matchedReasons: ["Contains a deadline keyword", "Detected a date"],
+                primaryHypothesisId: ObligationHypothesis.deadlineImplied.rawValue,
+                reasonCode: .deadlineMentioned,
+                policyVersion: DecisionPolicyVersion.v2PolicyDriven.rawValue,
                 snoozedUntil: nil,
                 repeatCount: 1,
                 lastSeenAt: now,
@@ -390,6 +399,9 @@ extension ObligationRepository {
                 matchedRuleIds: ["request_keyword", "attachment_present"],
                 matchedSignalTypes: ["keyword", "attachment"],
                 matchedReasons: ["Explicit request language", "Attachment included"],
+                primaryHypothesisId: ObligationHypothesis.userActionRequired.rawValue,
+                reasonCode: .directRequestWithoutDeadline,
+                policyVersion: DecisionPolicyVersion.v2PolicyDriven.rawValue,
                 snoozedUntil: nil,
                 repeatCount: 1,
                 lastSeenAt: now,
@@ -411,6 +423,9 @@ extension ObligationRepository {
                 matchedRuleIds: ["travel_keyword", "date_detected"],
                 matchedSignalTypes: ["keyword", "date"],
                 matchedReasons: ["Travel itinerary or booking", "Detected a date"],
+                primaryHypothesisId: ObligationHypothesis.appointmentActionRequired.rawValue,
+                reasonCode: .appointmentActionRequired,
+                policyVersion: DecisionPolicyVersion.v2PolicyDriven.rawValue,
                 snoozedUntil: nil,
                 repeatCount: 2,
                 lastSeenAt: now,
@@ -432,6 +447,9 @@ extension ObligationRepository {
                 matchedRuleIds: ["policy_keyword", "date_detected"],
                 matchedSignalTypes: ["keyword", "date"],
                 matchedReasons: ["Policy or renewal language", "Detected a date"],
+                primaryHypothesisId: ObligationHypothesis.documentExpiration.rawValue,
+                reasonCode: .deadlineMentioned,
+                policyVersion: DecisionPolicyVersion.v2PolicyDriven.rawValue,
                 snoozedUntil: nil,
                 repeatCount: 1,
                 lastSeenAt: now,
@@ -453,6 +471,9 @@ extension ObligationRepository {
                 matchedRuleIds: ["request_keyword"],
                 matchedSignalTypes: ["keyword"],
                 matchedReasons: ["Explicit request language"],
+                primaryHypothesisId: ObligationHypothesis.waitingOnThirdParty.rawValue,
+                reasonCode: .waitingOnThirdParty,
+                policyVersion: DecisionPolicyVersion.v2PolicyDriven.rawValue,
                 snoozedUntil: nil,
                 repeatCount: 1,
                 lastSeenAt: now,
@@ -474,6 +495,9 @@ extension ObligationRepository {
                 matchedRuleIds: ["policy_keyword"],
                 matchedSignalTypes: ["keyword"],
                 matchedReasons: ["Policy or renewal language"],
+                primaryHypothesisId: ObligationHypothesis.waitingOnThirdParty.rawValue,
+                reasonCode: .waitingOnThirdParty,
+                policyVersion: DecisionPolicyVersion.v2PolicyDriven.rawValue,
                 snoozedUntil: nil,
                 repeatCount: 1,
                 lastSeenAt: now,

@@ -16,6 +16,9 @@
 		9A28A7132F2A0001 /* RuleEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A28A7102F2A0001 /* RuleEngineTests.swift */; };
 		9A28A7142F2A0001 /* SampleEmails.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A28A7112F2A0001 /* SampleEmails.swift */; };
 		9A28A77A2F2B1001 /* TextSanitizerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A28A7792F2B1001 /* TextSanitizerTests.swift */; };
+		F2A100000000000000000015 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = F2A100000000000000000016 /* PrivacyInfo.xcprivacy */; };
+		F2A100000000000000000003 /* ObligationRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2A100000000000000000013 /* ObligationRepositoryTests.swift */; };
+		F2A100000000000000000004 /* ObligationExtractorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2A100000000000000000014 /* ObligationExtractorTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -39,6 +42,9 @@
 		9A28A7112F2A0001 /* SampleEmails.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleEmails.swift; sourceTree = "<group>"; };
 		9A28A7122F2A0001 /* OnDueTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = OnDueTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		9A28A7792F2B1001 /* TextSanitizerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextSanitizerTests.swift; sourceTree = "<group>"; };
+		F2A100000000000000000016 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		F2A100000000000000000013 /* ObligationRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObligationRepositoryTests.swift; sourceTree = "<group>"; };
+		F2A100000000000000000014 /* ObligationExtractorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObligationExtractorTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -52,7 +58,6 @@
 				Repositories/DailyDigestScheduler.swift,
 				Repositories/DateExtractor.swift,
 				Repositories/FeedbackRepository.swift,
-				Repositories/IMPLEMENTATION_ROADMAP.md,
 				Repositories/MailboxAccountRepository.swift,
 				Repositories/ManualPromotion.swift,
 				Repositories/MessageRepository.swift,
@@ -61,7 +66,6 @@
 				Repositories/ProjectContext.swift,
 				Repositories/RuleWeightRepository.swift,
 				Repositories/SuppressionRepository.swift,
-				Repositories/USER_EXPERIENCE_GUIDE.md,
 				Repositories/YearScanRepository.swift,
 			);
 			target = 9A28A4812F27AD0F00B0DB3C /* OnDue */;
@@ -211,6 +215,7 @@
 				9A28A5FC2F28671200B0DB3C /* Utilities */,
 				9A28A5BE2F285EAF00B0DB3C /* Assets.xcassets */,
 				9A28A5BF2F285EAF00B0DB3C /* README.md */,
+				F2A100000000000000000016 /* PrivacyInfo.xcprivacy */,
 				9A28A6702F29A3C300B0DB3C /* .gitignore */,
 				9A28A6792F29AE1000B0DB3C /* GoogleService-Info.plist */,
 			);
@@ -231,6 +236,8 @@
 				9A28A7102F2A0001 /* RuleEngineTests.swift */,
 				9A28A7112F2A0001 /* SampleEmails.swift */,
 				9A28A7792F2B1001 /* TextSanitizerTests.swift */,
+				F2A100000000000000000013 /* ObligationRepositoryTests.swift */,
+				F2A100000000000000000014 /* ObligationExtractorTests.swift */,
 			);
 			path = OnDueTests;
 			sourceTree = "<group>";
@@ -331,6 +338,7 @@
 				9A28A5D72F285EAF00B0DB3C /* Assets.xcassets in Resources */,
 				9A28A5D82F285EAF00B0DB3C /* README.md in Resources */,
 				9A28A67C2F29B29300B0DB3C /* GoogleService-Info.plist in Resources */,
+				F2A100000000000000000015 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -358,6 +366,8 @@
 				9A28A7132F2A0001 /* RuleEngineTests.swift in Sources */,
 				9A28A7142F2A0001 /* SampleEmails.swift in Sources */,
 				9A28A77A2F2B1001 /* TextSanitizerTests.swift in Sources */,
+				F2A100000000000000000003 /* ObligationRepositoryTests.swift in Sources */,
+				F2A100000000000000000004 /* ObligationExtractorTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

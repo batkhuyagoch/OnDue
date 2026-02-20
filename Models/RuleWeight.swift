@@ -1,6 +1,8 @@
 import Foundation
 import GRDB
 
+/// Deprecated scoring artifact.
+/// Policy-driven decisioning should not attach new logic to this model.
 struct RuleWeightRecord: Identifiable, Hashable, Codable, FetchableRecord, PersistableRecord {
     static let databaseTableName = "rule_weight"
 

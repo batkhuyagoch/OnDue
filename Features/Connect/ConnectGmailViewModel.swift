@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import BackgroundTasks
 
 extension Notification.Name {
     static let syncLog = Notification.Name("SyncLogNotification")
@@ -9,6 +10,14 @@ struct SyncLogEntry: Identifiable {
     let id = UUID().uuidString
     let timestamp: Date
     let message: String
+}
+
+/// Lightweight resumable state when backfill stops (user stop or quota error)
+struct BackfillResumableState {
+    let lastCompletedMonth: Int
+    let totalMonths: Int
+    let accountId: String
+    let isQuotaError: Bool
 }
 
 @MainActor
@@ -22,6 +31,9 @@ final class ConnectGmailViewModel: ObservableObject {
     @Published private(set) var isSyncing = false
     @Published private(set) var lastSyncDate: Date?
     @Published private(set) var isBackfilling = false
+    @Published private(set) var backfillProgressMonth: Int?
+    @Published private(set) var backfillTotalMonths: Int = 12
+    @Published private(set) var backfillResumableState: BackfillResumableState?
     @Published private(set) var isResetting = false
     @Published private(set) var lastSyncReport: SyncReport?
     @Published private(set) var syncLogs: [SyncLogEntry] = []
@@ -30,7 +42,9 @@ final class ConnectGmailViewModel: ObservableObject {
     // MARK: - Private
     
     private var mailboxAccountId: String?
+    private var requestBackfillStop = false
     private let lastConnectedAtKey = "gmail.lastConnectedAt"
+    private let backfillResumableKey = "gmail.backfill.resumable"
     private let lastConnectedTTL: TimeInterval = 7 * 24 * 60 * 60
     private var syncLogObserver: NSObjectProtocol?
 
@@ -65,6 +79,10 @@ final class ConnectGmailViewModel: ObservableObject {
                     provider: .gmail
                 )
                 mailboxAccountId = account?.id
+            }
+            if let persisted = loadPersistedBackfillResumable(),
+               persisted.accountId == mailboxAccountId {
+                backfillResumableState = persisted
             }
             return
         }
@@ -136,6 +154,7 @@ final class ConnectGmailViewModel: ObservableObject {
     }
     
     func disconnect(using environment: AppEnvironment) {
+        BackgroundSyncManager.cancelAllPendingTasks()
         environment.gmailAuthService.signOut()
         isConnected = false
         userEmail = nil
@@ -143,7 +162,9 @@ final class ConnectGmailViewModel: ObservableObject {
         statusMessage = nil
         lastSyncDate = nil
         lastSyncReport = nil
+        backfillResumableState = nil
         UserDefaults.standard.removeObject(forKey: lastConnectedAtKey)
+        clearPersistedBackfillResumable()
     }
 
     func resetLocalData(using environment: AppEnvironment) async {
@@ -170,6 +191,36 @@ final class ConnectGmailViewModel: ObservableObject {
         isResetting = false
     }
 
+    func deleteAllAccountData(using environment: AppEnvironment) async {
+        guard let accountId = mailboxAccountId else {
+            statusMessage = "Connect first to remove account data"
+            return
+        }
+
+        isResetting = true
+        statusMessage = "Removing all account data..."
+        do {
+            try await environment.gmailSyncCoordinator.deleteAllAccountData(
+                mailboxAccountId: accountId
+            )
+            AppLog.info("SyncUI.deleteAllAccountData", fields: ["mailboxAccountId": accountId])
+            environment.gmailAuthService.signOut()
+            BackgroundSyncManager.cancelAllPendingTasks()
+            isConnected = false
+            userEmail = nil
+            mailboxAccountId = nil
+            statusMessage = "All account data removed"
+            lastSyncDate = nil
+            lastSyncReport = nil
+            backfillResumableState = nil
+            UserDefaults.standard.removeObject(forKey: lastConnectedAtKey)
+            clearPersistedBackfillResumable()
+        } catch {
+            statusMessage = "Removal failed: \(error.localizedDescription)"
+        }
+        isResetting = false
+    }
+
     func addTestLog() {
         let message = "TestLog | time=\(Date())"
         appendLog(message)
@@ -189,7 +240,29 @@ final class ConnectGmailViewModel: ObservableObject {
             statusMessage = "Not connected"
             return
         }
-        await backfillEmails(using: environment)
+        backfillResumableState = nil
+        clearPersistedBackfillResumable()
+        await backfillEmails(using: environment, resumeFromMonth: nil)
+    }
+
+    func stopBackfill() {
+        requestBackfillStop = true
+    }
+
+    func resumeBackfill(using environment: AppEnvironment) async {
+        guard let accountId = mailboxAccountId else {
+            statusMessage = "Not connected"
+            return
+        }
+        guard let resumable = backfillResumableState ?? loadPersistedBackfillResumable(),
+              resumable.accountId == accountId else {
+            statusMessage = "Nothing to resume"
+            return
+        }
+        let startFrom = resumable.lastCompletedMonth + 1
+        backfillResumableState = nil
+        clearPersistedBackfillResumable()
+        await backfillEmails(using: environment, resumeFromMonth: startFrom)
     }
     
     // MARK: - Private Helpers
@@ -232,39 +305,172 @@ final class ConnectGmailViewModel: ObservableObject {
         }
     }
 
-    private func backfillEmails(using environment: AppEnvironment) async {
+    private func backfillEmails(using environment: AppEnvironment, resumeFromMonth: Int?) async {
         guard let accountId = mailboxAccountId else { return }
 
-        do {
-            let endDate = Date()
-            let startDate = Calendar.current.date(byAdding: .month, value: -12, to: endDate) ?? endDate
-            statusMessage = "Backfilling last 12 months..."
-            isBackfilling = true
+        let endDate = Date()
+        let startDate = Calendar.current.date(byAdding: .month, value: -12, to: endDate) ?? endDate
+        let monthRanges = buildMonthRanges(startDate: startDate, endDate: endDate)
+        let totalMonths = monthRanges.count
+        let startIndex = resumeFromMonth ?? 0
 
-            let report = try await environment.gmailSyncCoordinator.backfill(
-                mailboxAccountId: accountId,
-                startDate: startDate,
-                endDate: endDate,
-                daysBackForExtraction: 365
+        requestBackfillStop = false
+        isBackfilling = true
+        backfillTotalMonths = totalMonths
+
+        var aggMessageIDs = 0
+        var aggSaved = 0
+        var aggObligations = 0
+        var lastCompletedMonth = startIndex - 1
+
+        defer {
+            isBackfilling = false
+            backfillProgressMonth = nil
+        }
+
+        do {
+            for (index, range) in monthRanges.enumerated() where index >= startIndex {
+                if requestBackfillStop {
+                    lastCompletedMonth = index - 1
+                    let state = BackfillResumableState(
+                        lastCompletedMonth: lastCompletedMonth,
+                        totalMonths: totalMonths,
+                        accountId: accountId,
+                        isQuotaError: false
+                    )
+                    backfillResumableState = state
+                    persistBackfillResumable(state)
+                    if lastCompletedMonth < 0 {
+                        statusMessage = "Stopped before completing month 1. Tap Resume to continue."
+                    } else {
+                        statusMessage = "Stopped at month \(lastCompletedMonth + 1) of \(totalMonths). Tap Resume to continue."
+                    }
+                    lastSyncReport = SyncReport(
+                        messageIDsCount: aggMessageIDs,
+                        messagesSavedCount: aggSaved,
+                        obligationsCount: aggObligations,
+                        deletedOldMessagesCount: 0
+                    )
+                    return
+                }
+
+                backfillProgressMonth = index + 1
+                statusMessage = "Backfilling month \(index + 1) of \(totalMonths)..."
+
+                let report = try await environment.gmailSyncCoordinator.backfill(
+                    mailboxAccountId: accountId,
+                    startDate: range.start,
+                    endDate: range.end,
+                    daysBackForExtraction: 0
+                )
+                aggMessageIDs += report.messageIDsCount
+                aggSaved += report.messagesSavedCount
+                lastCompletedMonth = index
+            }
+
+            if totalMonths > 0 {
+                let recentMessages = try await environment.messageRepository.fetchRecent(
+                    mailboxAccountId: accountId,
+                    daysBack: 365
+                )
+                let obligations = try await environment.obligationExtractor.extract(
+                    from: recentMessages,
+                    mailboxAccountId: accountId
+                )
+                try await environment.obligationRepository.save(obligations)
+                aggObligations = obligations.count
+            }
+
+            lastSyncReport = SyncReport(
+                messageIDsCount: aggMessageIDs,
+                messagesSavedCount: aggSaved,
+                obligationsCount: aggObligations,
+                deletedOldMessagesCount: 0
             )
-            lastSyncReport = report
+            lastSyncDate = Date()
+            backfillResumableState = nil
+            clearPersistedBackfillResumable()
+            statusMessage = "Backfill complete: searched \(aggMessageIDs), saved \(aggSaved), obligations \(aggObligations)"
+
             AppLog.info(
                 "BackfillUI.complete",
                 fields: [
-                    "messageIDs": report.messageIDsCount,
-                    "messagesSaved": report.messagesSavedCount,
-                    "obligations": report.obligationsCount
+                    "messageIDs": aggMessageIDs,
+                    "messagesSaved": aggSaved,
+                    "obligations": aggObligations
                 ]
             )
 
-            lastSyncDate = Date()
-            isBackfilling = false
-            statusMessage = "Backfill complete: searched \(report.messageIDsCount), saved \(report.messagesSavedCount), obligations \(report.obligationsCount)"
-
         } catch {
-            isBackfilling = false
-            statusMessage = "Backfill failed: \(error.localizedDescription)"
+            let isQuota = Self.isQuotaRelatedError(error)
+            let state = BackfillResumableState(
+                lastCompletedMonth: lastCompletedMonth,
+                totalMonths: totalMonths,
+                accountId: accountId,
+                isQuotaError: isQuota
+            )
+            backfillResumableState = state
+            persistBackfillResumable(state)
+            if isQuota {
+                if lastCompletedMonth < 0 {
+                    statusMessage = "API limit reached before completing month 1. Tap Resume later to continue."
+                } else {
+                    statusMessage = "API limit reached at month \(lastCompletedMonth + 1) of \(totalMonths). Tap Resume later to continue."
+                }
+            } else {
+                statusMessage = "Backfill failed: \(error.localizedDescription)"
+            }
         }
+    }
+
+    private static func isQuotaRelatedError(_ error: Error) -> Bool {
+        if case GmailClientError.apiError(let code, _) = error {
+            return code == 429 || code == 403
+        }
+        return false
+    }
+
+    private func buildMonthRanges(startDate: Date, endDate: Date) -> [(start: Date, end: Date)] {
+        let calendar = Calendar.current
+        var ranges: [(start: Date, end: Date)] = []
+        var cursor = startDate
+        while cursor < endDate {
+            let next = calendar.date(byAdding: .month, value: 1, to: cursor) ?? endDate
+            let sliceEnd = min(next, endDate)
+            ranges.append((start: cursor, end: sliceEnd))
+            cursor = sliceEnd
+        }
+        return ranges
+    }
+
+    private func persistBackfillResumable(_ state: BackfillResumableState) {
+        let dict: [String: Any] = [
+            "lastCompletedMonth": state.lastCompletedMonth,
+            "totalMonths": state.totalMonths,
+            "accountId": state.accountId,
+            "isQuotaError": state.isQuotaError
+        ]
+        UserDefaults.standard.set(dict, forKey: backfillResumableKey)
+    }
+
+    private func loadPersistedBackfillResumable() -> BackfillResumableState? {
+        guard let dict = UserDefaults.standard.dictionary(forKey: backfillResumableKey),
+              let lastCompletedMonth = dict["lastCompletedMonth"] as? Int,
+              let totalMonths = dict["totalMonths"] as? Int,
+              let accountId = dict["accountId"] as? String,
+              let isQuotaError = dict["isQuotaError"] as? Bool else {
+            return nil
+        }
+        return BackfillResumableState(
+            lastCompletedMonth: lastCompletedMonth,
+            totalMonths: totalMonths,
+            accountId: accountId,
+            isQuotaError: isQuotaError
+        )
+    }
+
+    private func clearPersistedBackfillResumable() {
+        UserDefaults.standard.removeObject(forKey: backfillResumableKey)
     }
 
     private func appendLog(_ message: String) {

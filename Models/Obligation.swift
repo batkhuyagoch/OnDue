@@ -22,6 +22,9 @@ struct ObligationRecord: Identifiable, Hashable, Codable, FetchableRecord, Persi
     var matchedRuleIds: String
     var matchedSignalTypes: String
     var matchedReasons: String
+    var primaryHypothesisId: String?
+    var reasonCode: String?
+    var policyVersion: String?
     var snoozedUntil: Date?
     var resolvedAt: Date?
     var repeatCount: Int
@@ -46,6 +49,9 @@ struct ObligationRecord: Identifiable, Hashable, Codable, FetchableRecord, Persi
         matchedRuleIds: String = "",
         matchedSignalTypes: String = "",
         matchedReasons: String = "",
+        primaryHypothesisId: String? = nil,
+        reasonCode: String? = nil,
+        policyVersion: String? = nil,
         snoozedUntil: Date? = nil,
         resolvedAt: Date? = nil,
         repeatCount: Int = 1,
@@ -69,12 +75,35 @@ struct ObligationRecord: Identifiable, Hashable, Codable, FetchableRecord, Persi
         self.matchedRuleIds = matchedRuleIds
         self.matchedSignalTypes = matchedSignalTypes
         self.matchedReasons = matchedReasons
+        self.primaryHypothesisId = primaryHypothesisId
+        self.reasonCode = reasonCode
+        self.policyVersion = policyVersion
         self.snoozedUntil = snoozedUntil
         self.resolvedAt = resolvedAt
         self.repeatCount = repeatCount
         self.lastSeenAt = lastSeenAt
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+}
+
+extension ObligationRecord {
+    enum CanonicalDecisionInvariantError: Error {
+        case missingPrimaryHypothesisId
+        case missingReasonCode
+        case missingPolicyVersion
+    }
+
+    func validateCanonicalDecisionInvariants() throws {
+        guard let primaryHypothesisId, !primaryHypothesisId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw CanonicalDecisionInvariantError.missingPrimaryHypothesisId
+        }
+        guard let reasonCode, !reasonCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw CanonicalDecisionInvariantError.missingReasonCode
+        }
+        guard let policyVersion, !policyVersion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw CanonicalDecisionInvariantError.missingPolicyVersion
+        }
     }
 }
 
@@ -126,6 +155,9 @@ struct ObligationItem: Identifiable, Hashable {
     let matchedRuleIds: [String]
     let matchedSignalTypes: [String]
     let matchedReasons: [String]
+    let primaryHypothesisId: String?
+    let reasonCode: ReasonCode
+    let policyVersion: String
     let snoozedUntil: Date?
     let repeatCount: Int
     let lastSeenAt: Date?
@@ -206,6 +238,21 @@ extension ObligationItem {
             .split(separator: "|")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+        guard let primaryHypothesisId = record.primaryHypothesisId,
+              !primaryHypothesisId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            preconditionFailure("ObligationItem requires non-empty primaryHypothesisId for canonical decision integrity.")
+        }
+        self.primaryHypothesisId = primaryHypothesisId
+        guard let code = record.reasonCode,
+              let parsed = ReasonCode(rawValue: code) else {
+            preconditionFailure("ObligationItem requires valid reasonCode for canonical decision integrity.")
+        }
+        self.reasonCode = parsed
+        guard let policyVersion = record.policyVersion,
+              !policyVersion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            preconditionFailure("ObligationItem requires non-empty policyVersion for canonical decision integrity.")
+        }
+        self.policyVersion = policyVersion
         self.snoozedUntil = record.snoozedUntil
         self.repeatCount = record.repeatCount
         self.lastSeenAt = record.lastSeenAt

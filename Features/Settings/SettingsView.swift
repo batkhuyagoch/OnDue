@@ -5,6 +5,9 @@ struct SettingsView: View {
     @State private var exportPath: String?
     @State private var exportURL: URL?
     @State private var exportError: String?
+    @State private var stratifiedExportPath: String?
+    @State private var stratifiedExportURL: URL?
+    @State private var stratifiedExportError: String?
     @State private var nearMissExportPath: String?
     @State private var nearMissExportURL: URL?
     @State private var nearMissExportError: String?
@@ -12,6 +15,32 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             List {
+                Section("Privacy & Data") {
+                    if let privacyPolicyURL = AppPrivacyConfiguration.privacyPolicyURL {
+                        Link(destination: privacyPolicyURL) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Privacy policy")
+                                    .font(.subheadline.weight(.semibold))
+                                Text("Review what data is accessed, stored, and how deletion works")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    NavigationLink {
+                        ConnectGmailView()
+                            .environmentObject(environment)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Connect Gmail & data controls")
+                                .font(.subheadline.weight(.semibold))
+                            Text("Connect account, view disclosures, reset cache, or delete all account data")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
                 Section("Notifications") {
                     NavigationLink {
                         DigestSettingsView()
@@ -46,9 +75,14 @@ struct SettingsView: View {
                             .textSelection(.enabled)
                     }
                     if let exportError {
-                        Text(exportError)
-                            .font(.footnote)
-                            .foregroundStyle(.red)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Export failed: \(exportError)")
+                                .font(.footnote)
+                                .foregroundStyle(.red)
+                            Text("Tap Export gold dataset above to try again.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     if let exportURL {
                         ShareLink(item: exportURL) {
@@ -60,12 +94,33 @@ struct SettingsView: View {
                         Task {
                             do {
                                 let url = try await GoldDatasetExporter.exportStratified(environment: environment.value)
-                                exportPath = url.path
-                                exportURL = url
-                                exportError = nil
+                                stratifiedExportPath = url.path
+                                stratifiedExportURL = url
+                                stratifiedExportError = nil
                             } catch {
-                                exportError = error.localizedDescription
+                                stratifiedExportError = error.localizedDescription
                             }
+                        }
+                    }
+                    if let stratifiedExportPath {
+                        Text(stratifiedExportPath)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    if let stratifiedExportError {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Export failed: \(stratifiedExportError)")
+                                .font(.footnote)
+                                .foregroundStyle(.red)
+                            Text("Tap the stratified export button above to retry.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    if let stratifiedExportURL {
+                        ShareLink(item: stratifiedExportURL) {
+                            Label("Share stratified export", systemImage: "square.and.arrow.up")
                         }
                     }
 
@@ -88,9 +143,14 @@ struct SettingsView: View {
                             .textSelection(.enabled)
                     }
                     if let nearMissExportError {
-                        Text(nearMissExportError)
-                            .font(.footnote)
-                            .foregroundStyle(.red)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Export failed: \(nearMissExportError)")
+                                .font(.footnote)
+                                .foregroundStyle(.red)
+                            Text("Tap the near-miss export button above to retry.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     if let nearMissExportURL {
                         ShareLink(item: nearMissExportURL) {
