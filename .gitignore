@@ -36,3 +36,4 @@ GoogleService-Info.plist
 .env
 dev.info.plist
 
+.tmp/
