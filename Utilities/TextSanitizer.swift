@@ -1,7 +1,43 @@
 import Foundation
 import UIKit
 
+enum EmailContentBudget {
+    static let htmlPrecleanCharsMax = 200_000
+    static let parsedContextCharsMax = 8_000
+    static let normalizedTextCharsMax = 16_000
+    static let decodeBytesMax = 2_000_000
+    static let windowRadiusChars = 220
+    static let maxContextWindows = 8
+    static let detailPreviewCharsMax = 600
+    static let detailFullSafeCharsMax = 32_000
+}
+
 enum TextSanitizer {
+    struct DetailText {
+        let preview: String
+        let full: String
+        let isTruncated: Bool
+    }
+
+    static func sanitizeDetailMessage(bodyText: String?, bodyHtml: String?, snippet: String?) -> DetailText? {
+        guard let full = sanitizeMessagePreservingNewlines(bodyText: bodyText, bodyHtml: bodyHtml, snippet: snippet),
+              !full.isEmpty else {
+            return nil
+        }
+
+        let boundedFull = String(full.prefix(EmailContentBudget.detailFullSafeCharsMax))
+        let isTruncated = full.count > EmailContentBudget.detailPreviewCharsMax
+        let preview: String
+        if isTruncated {
+            let truncated = String(boundedFull.prefix(EmailContentBudget.detailPreviewCharsMax))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            preview = truncated + "…"
+        } else {
+            preview = boundedFull
+        }
+        return DetailText(preview: preview, full: boundedFull, isTruncated: isTruncated)
+    }
+
     static func sanitizeMessage(bodyText: String?, bodyHtml: String?, snippet: String?) -> String? {
         if let bodyText, !bodyText.isEmpty {
             return sanitize(bodyText)

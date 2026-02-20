@@ -186,8 +186,7 @@ final class GoldDatasetLabelViewModel: ObservableObject {
                 "thirdPartyAwaitingYou",
                 "legalComplianceResponse",
                 "marketingNoise"
-            ],
-            reasonValues: ReasonCatalog.labelingOptions
+            ]
         )
     }
 
@@ -241,10 +240,11 @@ final class GoldDatasetLabelViewModel: ObservableObject {
     }
 
     func canonicalReasonText(for item: GoldDatasetExportItem) -> String? {
-        guard let raw = item.currentReasonCode, let code = ReasonCode(rawValue: raw) else {
-            return nil
+        guard let first = item.currentReasons.first else { return nil }
+        if let code = ReasonCode(rawValue: first) {
+            return ReasonCatalog.displayText(for: code)
         }
-        return ReasonCatalog.displayText(for: code)
+        return first
     }
 
     func shouldChooseHypothesis(for outcome: String?) -> Bool {
