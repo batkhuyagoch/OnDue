@@ -1,0 +1,149 @@
+{
+  "schemaVersion": "gold_dataset_v1",
+  "generatedAt": "2026-02-15T00:00:00Z",
+  "metadata": {
+    "notes": "Manually validated fixture baseline for deterministic replay regression.",
+    "manualValidated": true
+  },
+  "items": [
+    {
+      "id": "gold_v1_001",
+      "rawMessage": {
+        "mailboxAccountId": "acct_fixture",
+        "providerMessageId": "fixture-msg-001",
+        "internalDate": "2026-02-10T08:15:00Z",
+        "fromEmail": "billing@example.com",
+        "fromDomain": "example.com",
+        "subject": "Invoice due tomorrow",
+        "snippet": "Please pay by tomorrow to avoid late fees.",
+        "bodyText": "Please pay your invoice by tomorrow to avoid late fees.",
+        "bodyHtml": null,
+        "hasAttachments": false,
+        "labelIds": [
+          "inbox"
+        ]
+      },
+      "expectedSnapshot": {
+        "sampleId": "gold_v1_001",
+        "matchedSignalIds": [
+          "deadline_keyword",
+          "payment_keyword",
+          "request_keyword"
+        ],
+        "hypothesisResults": [
+          {
+            "hypothesisId": "paymentFailure",
+            "confidence": "high",
+            "reasons": [
+              "Payment or billing language",
+              "Contains a deadline keyword",
+              "A payment issue appears to require action."
+            ],
+            "matchedSignalIds": [
+              "deadline_keyword",
+              "payment_keyword"
+            ]
+          }
+        ],
+        "primaryHypothesisId": "paymentFailure",
+        "outcome": "accept",
+        "confidence": 0.85,
+        "reasonCode": "direct_request_deadline",
+        "policyVersion": "v2_policy_driven",
+        "deadline": null,
+        "riskCategory": "medium"
+      }
+    },
+    {
+      "id": "gold_v1_002",
+      "rawMessage": {
+        "mailboxAccountId": "acct_fixture",
+        "providerMessageId": "fixture-msg-002",
+        "internalDate": "2026-02-11T09:20:00Z",
+        "fromEmail": "alerts@carrier.com",
+        "fromDomain": "carrier.com",
+        "subject": "Delivery attempt failed",
+        "snippet": "Please reschedule your delivery by Friday.",
+        "bodyText": "Delivery attempt failed. Please reschedule delivery before Friday.",
+        "bodyHtml": null,
+        "hasAttachments": false,
+        "labelIds": [
+          "inbox"
+        ]
+      },
+      "expectedSnapshot": {
+        "sampleId": "gold_v1_002",
+        "matchedSignalIds": [
+          "delivery_action_required",
+          "request_keyword"
+        ],
+        "hypothesisResults": [
+          {
+            "hypothesisId": "deliveryRequired",
+            "confidence": "high",
+            "reasons": [
+              "Delivery action required",
+              "A delivery step may need your attention."
+            ],
+            "matchedSignalIds": [
+              "delivery_action_required"
+            ]
+          }
+        ],
+        "primaryHypothesisId": "deliveryRequired",
+        "outcome": "needsReview",
+        "confidence": 0.55,
+        "reasonCode": "delivery_action",
+        "policyVersion": "v2_policy_driven",
+        "deadline": null,
+        "riskCategory": "low"
+      }
+    },
+    {
+      "id": "gold_v1_003",
+      "rawMessage": {
+        "mailboxAccountId": "acct_fixture",
+        "providerMessageId": "fixture-msg-003",
+        "internalDate": "2026-02-12T10:10:00Z",
+        "fromEmail": "news@deals.example.com",
+        "fromDomain": "deals.example.com",
+        "subject": "Limited time offer - 50% off",
+        "snippet": "Shop now and save. Unsubscribe anytime.",
+        "bodyText": "Special promotion just for you. Unsubscribe here.",
+        "bodyHtml": null,
+        "hasAttachments": false,
+        "labelIds": [
+          "category_promotions"
+        ]
+      },
+      "expectedSnapshot": {
+        "sampleId": "gold_v1_003",
+        "matchedSignalIds": [
+          "promo_keywords",
+          "unsubscribe_footer"
+        ],
+        "hypothesisResults": [
+          {
+            "hypothesisId": "marketingNoise",
+            "confidence": "high",
+            "reasons": [
+              "Unsubscribe or preference footer",
+              "Marketing language"
+            ],
+            "matchedSignalIds": [
+              "promo_keywords",
+              "unsubscribe_footer"
+            ]
+          }
+        ],
+        "primaryHypothesisId": "marketingNoise",
+        "outcome": "reject",
+        "confidence": 0.3,
+        "reasonCode": "marketing_promo",
+        "policyVersion": "v2_policy_driven",
+        "deadline": null,
+        "riskCategory": "low"
+      }
+    }
+  ]
+}
