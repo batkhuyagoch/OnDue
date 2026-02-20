@@ -34,43 +34,43 @@ jobs:
         run: |
           set -euo pipefail
           SIMULATOR_ID="$(python3 - <<'PY'
-import re
-import subprocess
+          import re
+          import subprocess
 
-out = subprocess.check_output(
-    ["xcrun", "simctl", "list", "devices", "available"],
-    text=True,
-)
-preferred = ("iPhone 17", "iPhone 16", "iPhone 15", "iPhone 14")
-selected_id = None
+          out = subprocess.check_output(
+              ["xcrun", "simctl", "list", "devices", "available"],
+              text=True,
+          )
+          preferred = ("iPhone 17", "iPhone 16", "iPhone 15", "iPhone 14")
+          selected_id = None
 
-lines = out.splitlines()
-for model in preferred:
-    for line in lines:
-        if model not in line:
-            continue
-        m = re.search(r"\(([0-9A-F-]{36})\)", line)
-        if m:
-            selected_id = m.group(1)
-            break
-    if selected_id:
-        break
+          lines = out.splitlines()
+          for model in preferred:
+              for line in lines:
+                  if model not in line:
+                      continue
+                  m = re.search(r"\(([0-9A-F-]{36})\)", line)
+                  if m:
+                      selected_id = m.group(1)
+                      break
+              if selected_id:
+                  break
 
-if not selected_id:
-    for line in lines:
-        if "iPhone" not in line:
-            continue
-        m = re.search(r"\(([0-9A-F-]{36})\)", line)
-        if m:
-            selected_id = m.group(1)
-            break
+          if not selected_id:
+              for line in lines:
+                  if "iPhone" not in line:
+                      continue
+                  m = re.search(r"\(([0-9A-F-]{36})\)", line)
+                  if m:
+                      selected_id = m.group(1)
+                      break
 
-if not selected_id:
-    raise SystemExit("No available iPhone simulator found.")
+          if not selected_id:
+              raise SystemExit("No available iPhone simulator found.")
 
-print(selected_id)
-PY
-)"
+          print(selected_id)
+          PY
+          )"
           echo "simulator_id=${SIMULATOR_ID}" >> "$GITHUB_OUTPUT"
 
       - name: Run strict gold replay gate
