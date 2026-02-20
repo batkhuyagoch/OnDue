@@ -72,6 +72,32 @@ jobs:
           )"
           echo "simulator_name=${SIMULATOR_NAME}" >> "$GITHUB_OUTPUT"
 
+      - name: Create CI GoogleService-Info.plist
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f "GoogleService-Info.plist" ]]; then
+            echo "GoogleService-Info.plist already present."
+            exit 0
+          fi
+
+          cat > "GoogleService-Info.plist" <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CLIENT_ID</key>
+            <string>ci-placeholder.apps.googleusercontent.com</string>
+            <key>REVERSED_CLIENT_ID</key>
+            <string>com.googleusercontent.apps.ci-placeholder</string>
+            <key>PLIST_VERSION</key>
+            <string>1</string>
+            <key>BUNDLE_ID</key>
+            <string>com.hugo.OnDue</string>
+          </dict>
+          </plist>
+          EOF
+
       - name: Run strict gold replay gate
         shell: bash
         run: |
