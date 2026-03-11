@@ -6,6 +6,18 @@ enum YearScanPhase: String, Codable, Hashable {
     case scanning
 }
 
+struct YearScanMonthSummary: Codable, Hashable, Identifiable {
+    var id: String { monthLabel }
+    var monthLabel: String
+    var monthIndex: Int
+    var messagesScanned: Int
+    var promotedCount: Int
+    var expectedCount: Int
+    var droppedCount: Int
+    var isInProgress: Bool
+    var completedAt: Date?
+}
+
 struct YearScanResumeState: Codable, Hashable {
     var accountIndex: Int
     var monthIndex: Int
@@ -22,6 +34,9 @@ struct YearScanResumeState: Codable, Hashable {
     var lastKnownBatchSize: Int? = nil
     var configuredRangeMonths: Int? = nil
     var configuredIntensity: String? = nil
+    var currentMonthLabel: String? = nil
+    var currentPage: Int? = nil
+    var monthSummaries: [YearScanMonthSummary]? = nil
 }
 
 struct YearScanSnapshot: Hashable {

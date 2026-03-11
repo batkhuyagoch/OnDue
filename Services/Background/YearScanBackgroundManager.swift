@@ -178,6 +178,10 @@ enum YearScanBackgroundManager {
                     scanIntensity: runConfiguration.intensity.rawValue,
                     excludedProviderMessageIds: excluded
                 )
+                await YearScanCoordinator.bridgePromotedFindingsToObligations(
+                    environment: environment,
+                    items: runResult.items
+                )
                 AppLog.info(
                     "YearScanBackground.complete",
                     fields: [

@@ -124,6 +124,24 @@ final class ObligationRepositoryTests: XCTestCase {
         XCTAssertEqual(merged.repeatCount, 3)
     }
 
+    func testSaveRecords_PreservesUserDismissedStatusOnRerun() async throws {
+        let key = "acct|example.com|preserve-dismissed"
+        let firstPk = try seedMessage(providerMessageId: "dismiss_keep_1")
+        try await repository.save([makeRecord(messagePk: firstPk, obligationKey: key)])
+
+        guard let existing = try fetchSingle(for: key) else {
+            return XCTFail("Expected existing obligation")
+        }
+        try await repository.updateStatus(id: existing.id, status: .dismissed)
+
+        let secondPk = try seedMessage(providerMessageId: "dismiss_keep_2")
+        try await repository.save([makeRecord(messagePk: secondPk, obligationKey: key, score: 0.99)])
+
+        let merged = try fetchSingle(for: key)
+        XCTAssertEqual(merged?.status, .dismissed)
+        XCTAssertEqual(merged?.repeatCount, 2)
+    }
+
     // MARK: - Helpers
 
     private func seedMailbox(mailboxAccountId: String = "acct") throws {

@@ -5,8 +5,10 @@ import Combine
 
 struct DigestView_Redesigned: View {
     @EnvironmentObject private var environment: AppEnvironmentStore
+    @EnvironmentObject private var yearScanState: YearScanState
     @StateObject private var viewModel = DigestViewModel()
     @Namespace private var animation
+    @State private var isQuickSyncing = false
 
     var body: some View {
         ScrollView {
@@ -44,8 +46,19 @@ struct DigestView_Redesigned: View {
         .onReceive(environment.value.filterPreferencesStore.objectWillChange) { _ in
             Task { await viewModel.loadDigest(using: environment.value) }
         }
-        .searchable(text: $viewModel.searchQuery, placement: .navigationBarDrawer(displayMode: .automatic))
+        .searchable(
+            text: $viewModel.searchQuery,
+            placement: .navigationBarDrawer(displayMode: .automatic),
+            prompt: isSearchBlocked ? "Search disabled while scan/sync is running" : "Search obligations"
+        )
+        .searchDisabled(isSearchBlocked)
         .onChange(of: viewModel.searchQuery) { _, newValue in
+            guard !isSearchBlocked else {
+                if !newValue.isEmpty {
+                    viewModel.searchQuery = ""
+                }
+                return
+            }
             viewModel.updateSearchQuery(newValue)
         }
         .onChange(of: viewModel.selectedMode) { _, _ in
@@ -76,6 +89,8 @@ struct DigestView_Redesigned: View {
     // MARK: - Quick Sync
     
     private func performQuickSync() async {
+        isQuickSyncing = true
+        defer { isQuickSyncing = false }
         do {
             let accounts = try await environment.value.mailboxAccountRepository.fetchAll()
             guard let account = accounts.first else { return }
@@ -91,6 +106,10 @@ struct DigestView_Redesigned: View {
         } catch {
             print("Quick sync failed: \(error)")
         }
+    }
+
+    private var isSearchBlocked: Bool {
+        yearScanState.isScanning || isQuickSyncing || viewModel.isLoading
     }
     
     // MARK: - Quick Stats Header

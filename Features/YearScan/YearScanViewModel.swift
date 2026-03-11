@@ -129,6 +129,7 @@ final class YearScanViewModel: ObservableObject {
     @Published private(set) var progressFraction: Double?
     @Published private(set) var expectedEventSignals: [ExpectedEventPatternSignal] = []
     @Published private(set) var droppedReasonCounts: [LongScanPromotionReasonCode: Int] = [:]
+    @Published private(set) var monthSummaries: [YearScanMonthSummary] = []
 
     private(set) var coverageSummary = YearScanRunner.coverageSummary
     private var accountsById: [String: MailboxAccountRecord] = [:]
@@ -164,6 +165,9 @@ final class YearScanViewModel: ObservableObject {
     }
 
     var progressDetail: String {
+        if isInProgress, let progressFraction, progressFraction >= 0.99 {
+            return "99% complete • Finalizing results and promoting to Now/Later..."
+        }
         if let progressPercentageText {
             if scannedMessageCount > 0 {
                 if let progressSliceText {
@@ -370,6 +374,7 @@ final class YearScanViewModel: ObservableObject {
             isInProgress = snapshot.isInProgress
             statusMessage = snapshot.statusMessage
             latestResumeState = snapshot.resumeState
+            monthSummaries = snapshot.resumeState?.monthSummaries ?? []
             estimatedScanMessages = max(estimatedScanMessages ?? 0, snapshot.scannedMessageCount)
             updateProgress()
             updateUIState()
@@ -389,6 +394,7 @@ final class YearScanViewModel: ObservableObject {
             progressFraction = 0.02
             expectedEventSignals = []
             droppedReasonCounts = [:]
+            monthSummaries = []
         }
         statusMessage = resume ? "Resuming scan..." : "Preparing scan..."
         isInProgress = true
@@ -436,6 +442,7 @@ final class YearScanViewModel: ObservableObject {
                     Task { @MainActor in
                         guard self.activeRunToken == runToken else { return }
                         self.latestResumeState = checkpoint
+                        self.monthSummaries = checkpoint.monthSummaries ?? []
                         self.updateProgress()
                         self.partialSequence += 1
                         let sequence = self.partialSequence
@@ -516,6 +523,7 @@ final class YearScanViewModel: ObservableObject {
             statusMessage = nil
             isInProgress = false
             latestResumeState = nil
+            monthSummaries = []
             progressFraction = 1.0
             activeRunToken = nil
             partialSequence = 0
@@ -531,9 +539,14 @@ final class YearScanViewModel: ObservableObject {
                 scanIntensity: runConfiguration.intensity.rawValue,
                 excludedProviderMessageIds: excluded
             )
+            await YearScanCoordinator.bridgePromotedFindingsToObligations(
+                environment: environment,
+                items: runResult.items
+            )
         } catch let quotaErr as YearScanQuotaStoppedError {
             self.error = quotaErr
             latestResumeState = quotaErr.resumeState
+            monthSummaries = quotaErr.resumeState.monthSummaries ?? []
             if quotaErr.resumeState.consecutiveQuotaHits >= 2 {
                 statusMessage = "Paused due to repeated Gmail API limits. Wait a bit, then resume."
             } else if quotaErr.lastCompletedMonthIndex < 0 {
@@ -557,6 +570,7 @@ final class YearScanViewModel: ObservableObject {
         } catch is CancellationError {
             isInProgress = true
             statusMessage = "Scan paused. Resume whenever you're ready."
+            monthSummaries = latestResumeState?.monthSummaries ?? []
             updateProgress()
             updateUIState()
             activeRunToken = nil
@@ -612,6 +626,7 @@ final class YearScanViewModel: ObservableObject {
 
     private func applyPartialUpdate(_ update: YearScanPartialUpdate) {
         latestResumeState = update.resumeState
+        monthSummaries = update.resumeState.monthSummaries ?? []
         scannedMessageCount = update.scannedMessageCount
         statusMessage = CoverageStatusPresenter.progressMessage(from: update.statusMessage)
         isInProgress = true

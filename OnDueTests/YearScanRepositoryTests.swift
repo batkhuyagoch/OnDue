@@ -346,5 +346,57 @@ final class YearScanRepositoryTests: XCTestCase {
         XCTAssertTrue(ids.contains("msg-302"))
         XCTAssertFalse(ids.contains("msg-303"))
     }
+
+    func testMarkPausedPersistsMonthSummariesAndResumePoint() async throws {
+        let summaries = [
+            YearScanMonthSummary(
+                monthLabel: "Jan 2025",
+                monthIndex: 0,
+                messagesScanned: 420,
+                promotedCount: 4,
+                expectedCount: 2,
+                droppedCount: 3,
+                isInProgress: false,
+                completedAt: Date(timeIntervalSince1970: 1_701_000_000)
+            ),
+            YearScanMonthSummary(
+                monthLabel: "Feb 2025",
+                monthIndex: 1,
+                messagesScanned: 200,
+                promotedCount: 2,
+                expectedCount: 1,
+                droppedCount: 1,
+                isInProgress: true,
+                completedAt: nil
+            )
+        ]
+        let resume = YearScanResumeState(
+            accountIndex: 0,
+            monthIndex: 1,
+            totalMonths: 12,
+            phase: .scanning,
+            beforeDate: Date(timeIntervalSince1970: 1_701_100_000),
+            beforePk: 144,
+            scannedMessageCount: 620,
+            lastStatusMessage: "Scanning inbox... 620 messages",
+            consecutiveQuotaHits: 0,
+            currentMonthLabel: "Feb 2025",
+            currentPage: 8,
+            monthSummaries: summaries
+        )
+
+        try await repository.markPaused(
+            scannedMessageCount: 620,
+            coverageSummary: YearScanRunner.coverageSummary,
+            statusMessage: "Paused while scanning",
+            resumeState: resume
+        )
+
+        let snapshot = try await repository.fetchLatest()
+        XCTAssertEqual(snapshot?.resumeState?.currentMonthLabel, "Feb 2025")
+        XCTAssertEqual(snapshot?.resumeState?.currentPage, 8)
+        XCTAssertEqual(snapshot?.resumeState?.monthSummaries?.count, 2)
+        XCTAssertEqual(snapshot?.resumeState?.monthSummaries?.first?.monthLabel, "Jan 2025")
+    }
 }
 

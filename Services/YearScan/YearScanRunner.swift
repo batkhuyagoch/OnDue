@@ -75,6 +75,68 @@ enum YearScanCoordinator {
     static func clearResumeState(environment: AppEnvironment) async {
         try? await environment.yearScanRepository.clearResumeState()
     }
+
+    static func bridgePromotedFindingsToObligations(
+        environment: AppEnvironment,
+        items: [YearScanItem]
+    ) async {
+        let promoted = items.filter { $0.promotionDecision == .promoted }
+        guard !promoted.isEmpty else { return }
+
+        let excludedMessageIDs = (try? await environment.messageStateManager.getExcludedMessageIDsCached(maxAge: 0)) ?? []
+        let grouped = Dictionary(grouping: promoted, by: { $0.mailboxAccountId })
+        var records: [ObligationRecord] = []
+
+        for (mailboxAccountId, accountItems) in grouped {
+            let providerIDs = Set(
+                accountItems
+                    .map(\.providerMessageId)
+                    .filter { !excludedMessageIDs.contains($0) }
+            )
+            guard !providerIDs.isEmpty else { continue }
+
+            let messages = (try? await environment.messageRepository.fetchByProviderMessageIds(
+                mailboxAccountId: mailboxAccountId,
+                providerMessageIds: providerIDs
+            )) ?? []
+
+            for message in messages {
+                guard let messagePk = message.pk else { continue }
+                let isSuppressed = (try? await environment.suppressionRepository.isBlocked(
+                    mailboxAccountId: mailboxAccountId,
+                    sender: message.fromEmail,
+                    domain: message.fromDomain
+                )) ?? false
+                if isSuppressed { continue }
+
+                guard let matchedItem = accountItems.first(where: { $0.providerMessageId == message.providerMessageId }),
+                      matchedItem.promotionDecision == .promoted else {
+                    continue
+                }
+                let assessment = try? await environment.obligationExtractor.assess(
+                    message: message,
+                    mailboxAccountId: mailboxAccountId
+                )
+                guard let assessment else { continue }
+                var record = environment.obligationExtractor.makeObligation(
+                    from: assessment,
+                    message: message,
+                    mailboxAccountId: mailboxAccountId,
+                    messagePk: messagePk
+                )
+                // Preserve year-scan calibrated values instead of re-assessment defaults.
+                record.confidence = matchedItem.confidence
+                record.deadlineAt = matchedItem.dueDate
+                if record.evidenceQuote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    record.evidenceQuote = matchedItem.snippet
+                }
+                records.append(record)
+            }
+        }
+
+        guard !records.isEmpty else { return }
+        try? await environment.obligationRepository.save(records)
+    }
 }
 
 enum YearScanRunner {
@@ -420,6 +482,8 @@ enum YearScanRunner {
         )
         var currentResumeState = normalizedResumeState
         var throttleState = ThrottleState()
+        var monthSummaries = normalizedResumeState?.monthSummaries ?? []
+        var providerMonthLabelByMessageId: [String: String] = [:]
 
         Logger.info("YearScan: start (\(accounts.count) accounts)")
         let accountStart = min(max(normalizedResumeState?.accountIndex ?? 0, 0), max(accounts.count - 1, 0))
@@ -432,8 +496,20 @@ enum YearScanRunner {
                 let range = monthRanges[index]
                 try Task.checkCancellation()
                 let monthIndex = index + 1
-                let status = "Backfilling: \(monthLabel(for: range.start)) (\(monthIndex)/\(totalMonths))"
+                let activeMonthLabel = monthLabel(for: range.start)
+                let status = "Backfilling: \(activeMonthLabel) (\(monthIndex)/\(totalMonths))"
                 statusUpdate?(status)
+                monthSummaries = upsertMonthSummary(
+                    in: monthSummaries,
+                    label: activeMonthLabel,
+                    monthIndex: index,
+                    messagesScanned: 0,
+                    promotedCount: 0,
+                    expectedCount: 0,
+                    droppedCount: 0,
+                    isInProgress: true,
+                    completedAt: nil
+                )
                 currentResumeState = YearScanResumeState(
                     accountIndex: accountIndex,
                     monthIndex: index,
@@ -445,7 +521,10 @@ enum YearScanRunner {
                     lastStatusMessage: status,
                     consecutiveQuotaHits: 0,
                     configuredRangeMonths: clampedRangeMonths,
-                    configuredIntensity: activeConfig.intensity.rawValue
+                    configuredIntensity: activeConfig.intensity.rawValue,
+                    currentMonthLabel: activeMonthLabel,
+                    currentPage: nil,
+                    monthSummaries: monthSummaries
                 )
                 if let state = currentResumeState {
                     checkpointUpdate?(state)
@@ -482,6 +561,17 @@ enum YearScanRunner {
                     throw error
                 }
                 backfillSavedTotal += backfillReport.messagesSavedCount
+                monthSummaries = upsertMonthSummary(
+                    in: monthSummaries,
+                    label: activeMonthLabel,
+                    monthIndex: index,
+                    messagesScanned: backfillReport.messagesSavedCount,
+                    promotedCount: 0,
+                    expectedCount: 0,
+                    droppedCount: 0,
+                    isInProgress: false,
+                    completedAt: Date()
+                )
                 Logger.info(
                     "YearScan: backfill slice account=\(account.emailAddress) month=\(monthIndex)/\(totalMonths) saved=\(backfillReport.messagesSavedCount)"
                 )
@@ -559,6 +649,9 @@ enum YearScanRunner {
                 // Filter out messages that have been deleted, dismissed, or archived locally
                 // UserActionRecord.messageID corresponds to MessageRecord.providerMessageId
                 let filteredMessages = messages.filter { !excludedIDs.contains($0.providerMessageId) }
+                for message in filteredMessages {
+                    providerMonthLabelByMessageId[message.providerMessageId] = monthLabel(for: message.internalDate)
+                }
 
                 page += 1
                 scannedMessageCount += messages.count  // Track total fetched for cursor management
@@ -627,8 +720,16 @@ enum YearScanRunner {
                     lastKnownThermalState: thermalLabel(snapshot.thermalState),
                     lastKnownBatchSize: currentPageSize,
                     configuredRangeMonths: clampedRangeMonths,
-                    configuredIntensity: activeConfig.intensity.rawValue
+                    configuredIntensity: activeConfig.intensity.rawValue,
+                    currentMonthLabel: monthLabel(for: messages.last?.internalDate ?? Date()),
+                    currentPage: page,
+                    monthSummaries: buildMonthSummaries(
+                        from: bestByThread,
+                        providerMonthLabels: providerMonthLabelByMessageId,
+                        existingSummaries: monthSummaries
+                    )
                 )
+                monthSummaries = currentResumeState?.monthSummaries ?? monthSummaries
                 if let state = currentResumeState {
                     checkpointUpdate?(state)
                     if shouldEmitPartial(
@@ -711,6 +812,87 @@ enum YearScanRunner {
         let formatter = DateFormatter()
         formatter.dateFormat = "MMM yyyy"
         return formatter.string(from: date)
+    }
+
+    private static func upsertMonthSummary(
+        in summaries: [YearScanMonthSummary],
+        label: String,
+        monthIndex: Int,
+        messagesScanned: Int,
+        promotedCount: Int,
+        expectedCount: Int,
+        droppedCount: Int,
+        isInProgress: Bool,
+        completedAt: Date?
+    ) -> [YearScanMonthSummary] {
+        var copy = summaries
+        if let existingIndex = copy.firstIndex(where: { $0.monthLabel == label }) {
+            copy[existingIndex] = YearScanMonthSummary(
+                monthLabel: label,
+                monthIndex: monthIndex,
+                messagesScanned: messagesScanned,
+                promotedCount: promotedCount,
+                expectedCount: expectedCount,
+                droppedCount: droppedCount,
+                isInProgress: isInProgress,
+                completedAt: completedAt
+            )
+        } else {
+            copy.append(
+                YearScanMonthSummary(
+                    monthLabel: label,
+                    monthIndex: monthIndex,
+                    messagesScanned: messagesScanned,
+                    promotedCount: promotedCount,
+                    expectedCount: expectedCount,
+                    droppedCount: droppedCount,
+                    isInProgress: isInProgress,
+                    completedAt: completedAt
+                )
+            )
+        }
+        return copy.sorted { lhs, rhs in
+            lhs.monthIndex < rhs.monthIndex
+        }
+    }
+
+    private static func buildMonthSummaries(
+        from bestByThread: [String: YearScanItem],
+        providerMonthLabels: [String: String],
+        existingSummaries: [YearScanMonthSummary]
+    ) -> [YearScanMonthSummary] {
+        var aggregated: [String: (promoted: Int, expected: Int, dropped: Int)] = [:]
+        for item in bestByThread.values {
+            let month = providerMonthLabels[item.providerMessageId] ?? "Unknown"
+            var bucket = aggregated[month] ?? (0, 0, 0)
+            switch item.promotionDecision {
+            case .promoted:
+                bucket.promoted += 1
+            case .expectedEvent:
+                bucket.expected += 1
+            case .dropped:
+                bucket.dropped += 1
+            }
+            aggregated[month] = bucket
+        }
+
+        var merged: [YearScanMonthSummary] = existingSummaries
+        for (label, counts) in aggregated {
+            let existing = merged.first(where: { $0.monthLabel == label })
+            let monthIndex = existing?.monthIndex ?? Int.max
+            merged = upsertMonthSummary(
+                in: merged,
+                label: label,
+                monthIndex: monthIndex,
+                messagesScanned: existing?.messagesScanned ?? 0,
+                promotedCount: counts.promoted,
+                expectedCount: counts.expected,
+                droppedCount: counts.dropped,
+                isInProgress: existing?.isInProgress ?? false,
+                completedAt: existing?.completedAt
+            )
+        }
+        return merged
     }
 
     private static func isQuotaRelatedError(_ error: Error) -> Bool {

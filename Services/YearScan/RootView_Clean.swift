@@ -67,6 +67,7 @@ struct MainAppView: View {
     var body: some View {
         NavigationStack {
             DigestView_Redesigned()
+                .environmentObject(yearScanState)
                 .navigationTitle("Obligations")
                 .toolbar {
                     // Left: Filter menu (existing)
@@ -447,6 +448,11 @@ private struct YearScanSection: View {
                         Text("\(Int((progress * 100).rounded(.down)))% complete")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                        if yearScanState.isFinalizing {
+                            Text("Finalizing results and promoting to Now/Later...")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     } else {
                         ProgressView()
                     }
@@ -454,6 +460,11 @@ private struct YearScanSection: View {
                     Text(yearScanState.bannerSubtitle)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
+                    if let resumePoint = yearScanState.resumePointText {
+                        Text(resumePoint)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
 
                     if let totalMonths = yearScanState.totalMonths,
                        totalMonths > 0,
@@ -500,6 +511,21 @@ private struct YearScanSection: View {
                             }
                         }
                     }
+
+                    if !yearScanState.monthSummaries.isEmpty {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(displayedMonthSummaries(yearScanState.monthSummaries)) { summary in
+                                HStack {
+                                    Text(summary.monthLabel)
+                                        .font(.caption.weight(.semibold))
+                                    Spacer()
+                                    Text(summaryLine(summary))
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
                 }
             } else {
                 Button {
@@ -522,6 +548,20 @@ private struct YearScanSection: View {
         } footer: {
             Text("Deep scan of your past 365 days to find missed obligations. Use this occasionally or when you first start using the app. For daily use, use Quick Sync instead.")
         }
+    }
+
+    private func displayedMonthSummaries(_ summaries: [YearScanMonthSummary]) -> [YearScanMonthSummary] {
+        let inProgress = summaries.filter(\.isInProgress).sorted { $0.monthIndex > $1.monthIndex }
+        let completed = summaries.filter { !$0.isInProgress }.sorted { $0.monthIndex > $1.monthIndex }
+        return Array((inProgress + completed).prefix(3))
+    }
+
+    private func summaryLine(_ summary: YearScanMonthSummary) -> String {
+        let counts = "P\(summary.promotedCount) E\(summary.expectedCount) D\(summary.droppedCount)"
+        if summary.messagesScanned > 0 {
+            return "\(summary.messagesScanned) msgs • \(counts)"
+        }
+        return counts
     }
 }
 
@@ -939,6 +979,8 @@ private struct YearScanHistoryView: View {
     @State private var showExpectedPatterns = false
     @State private var showDroppedDiagnostics = false
     @State private var lightweightPollTick: Int = 0
+    @State private var lastRefreshAt: Date?
+    @State private var newSinceLastRefreshCount: Int = 0
     
     var body: some View {
         Group {
@@ -991,6 +1033,13 @@ private struct YearScanHistoryView: View {
                 LabeledContent("Items Found", value: "\(snapshot.items.count)")
                 LabeledContent("Expected Patterns", value: "\(snapshot.expectedEventSignals.count)")
                 LabeledContent("Coverage", value: snapshot.coverageSummary)
+
+                if let lastRefreshAt, snapshot.isInProgress {
+                    LabeledContent("Last update", value: lastRefreshAt.formatted(date: .omitted, time: .standard))
+                }
+                if snapshot.isInProgress, newSinceLastRefreshCount > 0 {
+                    LabeledContent("New since refresh", value: "+\(newSinceLastRefreshCount)")
+                }
                 
                 if snapshot.isInProgress {
                     HStack {
@@ -1128,6 +1177,15 @@ private struct YearScanHistoryView: View {
                 Section {
                     LabeledContent("Phase", value: resumeState.phase.rawValue.capitalized)
                     LabeledContent("Progress", value: "\(resumeState.monthIndex + 1) of \(resumeState.totalMonths) months")
+                    if let monthLabel = resumeState.currentMonthLabel, !monthLabel.isEmpty {
+                        LabeledContent("Resume Month", value: monthLabel)
+                    }
+                    if let page = resumeState.currentPage, page > 0 {
+                        LabeledContent("Resume Page", value: "\(page)")
+                    }
+                    if let throttleReason = throttleReasonLabel(resumeState.lastThrottleReason) {
+                        LabeledContent("Paused Reason", value: throttleReason)
+                    }
                     
                     if let lastStatus = resumeState.lastStatusMessage {
                         LabeledContent("Status", value: lastStatus)
@@ -1136,6 +1194,35 @@ private struct YearScanHistoryView: View {
                     Text("Resume Info")
                 } footer: {
                     Text("This scan was paused and can be resumed from the Year Scan section")
+                }
+            }
+
+            if let summaries = snapshot.resumeState?.monthSummaries, !summaries.isEmpty {
+                Section {
+                    ForEach(monthSummaryRows(from: summaries)) { summary in
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text(summary.monthLabel)
+                                    .font(.subheadline.weight(.semibold))
+                                Spacer()
+                                if summary.isInProgress {
+                                    Text("Scanning")
+                                        .font(.caption2.weight(.semibold))
+                                        .foregroundStyle(.blue)
+                                } else if let completedAt = summary.completedAt {
+                                    Text(completedAt.formatted(date: .omitted, time: .shortened))
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            Text(monthSummarySubtitle(summary))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 2)
+                    }
+                } header: {
+                    Text("Monthly Progress")
                 }
             }
         }
@@ -1153,6 +1240,7 @@ private struct YearScanHistoryView: View {
         if showLoading {
             isLoading = true
         }
+        let previousItemsCount = snapshot?.items.count ?? 0
         do {
             if includeResults || snapshot == nil {
                 snapshot = try await environmentStore.value.yearScanRepository.fetchLatest()
@@ -1161,6 +1249,14 @@ private struct YearScanHistoryView: View {
                 snapshot = mergedSnapshot(current: current, state: state)
             } else {
                 snapshot = try await environmentStore.value.yearScanRepository.fetchLatest()
+            }
+            if let snapshot {
+                lastRefreshAt = Date()
+                if snapshot.isInProgress {
+                    newSinceLastRefreshCount = max(0, snapshot.items.count - previousItemsCount)
+                } else {
+                    newSinceLastRefreshCount = 0
+                }
             }
         } catch {
             print("Failed to load scan history: \(error)")
@@ -1217,6 +1313,31 @@ private struct YearScanHistoryView: View {
             return "Converted to expected event"
         case .promotedActionable:
             return "Promoted actionable"
+        }
+    }
+
+    private func monthSummaryRows(from summaries: [YearScanMonthSummary]) -> [YearScanMonthSummary] {
+        let inProgress = summaries.filter(\.isInProgress).sorted { $0.monthIndex > $1.monthIndex }
+        let completed = summaries.filter { !$0.isInProgress }.sorted { $0.monthIndex > $1.monthIndex }
+        return inProgress + completed
+    }
+
+    private func monthSummarySubtitle(_ summary: YearScanMonthSummary) -> String {
+        let counts = "Promoted \(summary.promotedCount) • Expected \(summary.expectedCount) • Dropped \(summary.droppedCount)"
+        if summary.messagesScanned > 0 {
+            return "\(summary.messagesScanned) scanned • \(counts)"
+        }
+        return counts
+    }
+
+    private func throttleReasonLabel(_ raw: String?) -> String? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return nil }
+        switch raw {
+        case "memory": return "Memory pressure"
+        case "thermal": return "Thermal pressure"
+        case "lowPower": return "Low Power Mode"
+        case "recovery": return "Recovery mode"
+        default: return raw.capitalized
         }
     }
 }

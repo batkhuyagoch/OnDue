@@ -85,6 +85,7 @@ class YearScanState: ObservableObject {
     @Published var currentPhase: YearScanPhase?
     @Published var currentMonthIndex: Int?
     @Published var totalMonths: Int?
+    @Published var monthSummaries: [YearScanMonthSummary] = []
     private var estimatedScanMessages: Int?
 
     var shouldShowBanner: Bool {
@@ -114,6 +115,9 @@ class YearScanState: ObservableObject {
 
     var bannerSubtitle: String {
         if isScanning {
+            if isFinalizing {
+                return "Finalizing results and promoting to Now/Later..."
+            }
             if let scanStatusMessage, !scanStatusMessage.isEmpty {
                 return scanStatusMessage
             }
@@ -124,6 +128,29 @@ class YearScanState: ObservableObject {
             return "Tap to review what we found"
         } else {
             return "Scan again to find new obligations"
+        }
+    }
+
+    var isFinalizing: Bool {
+        guard isScanning, let scanProgress else { return false }
+        return scanProgress >= 0.99
+    }
+
+    var resumePointText: String? {
+        guard isScanning else { return nil }
+        guard let currentPhase else { return nil }
+        switch currentPhase {
+        case .backfill:
+            let monthLabel = monthSummaries.first(where: { $0.isInProgress })?.monthLabel
+            if let monthLabel {
+                return "Resuming at \(monthLabel)"
+            }
+            if let currentMonthIndex, let totalMonths {
+                return "Resuming at month \(currentMonthIndex + 1) of \(totalMonths)"
+            }
+            return nil
+        case .scanning:
+            return "Resuming final review pass"
         }
     }
 
@@ -140,10 +167,12 @@ class YearScanState: ObservableObject {
                     currentPhase = resume.phase
                     currentMonthIndex = resume.monthIndex
                     totalMonths = resume.totalMonths
+                    monthSummaries = resume.monthSummaries ?? []
                 } else {
                     currentPhase = nil
                     currentMonthIndex = nil
                     totalMonths = nil
+                    monthSummaries = []
                 }
 
                 if snapshot.isInProgress {
@@ -180,6 +209,7 @@ class YearScanState: ObservableObject {
         currentPhase = nil
         currentMonthIndex = nil
         totalMonths = nil
+        monthSummaries = []
         let runConfiguration = YearScanRunner.RunConfiguration.from(policy: environment.syncPolicyStore)
         let restoredSession = (try? await environment.gmailAuthService.restorePreviousSignIn()) ?? false
         guard restoredSession else {
@@ -220,6 +250,7 @@ class YearScanState: ObservableObject {
                         self.currentPhase = checkpoint.phase
                         self.currentMonthIndex = checkpoint.monthIndex
                         self.totalMonths = checkpoint.totalMonths
+                        self.monthSummaries = checkpoint.monthSummaries ?? []
                         partialSequence += 1
                         let sequence = partialSequence
                         Task {
@@ -248,6 +279,7 @@ class YearScanState: ObservableObject {
                         self.currentPhase = update.resumeState.phase
                         self.currentMonthIndex = update.resumeState.monthIndex
                         self.totalMonths = update.resumeState.totalMonths
+                        self.monthSummaries = update.resumeState.monthSummaries ?? []
                         let promotedCount = update.items.filter { $0.promotionDecision == .promoted }.count
                         self.foundItemsCount = promotedCount
                         self.unseenItemsCount = promotedCount
@@ -295,6 +327,7 @@ class YearScanState: ObservableObject {
             currentPhase = nil
             currentMonthIndex = nil
             totalMonths = nil
+            monthSummaries = []
             let excluded = (try? await environment.messageStateManager.getExcludedMessageIDsCached(maxAge: 0)) ?? []
             try? await environment.yearScanRepository.saveRun(
                 items: result.items,
@@ -304,6 +337,10 @@ class YearScanState: ObservableObject {
                 scanRangeMonths: runConfiguration.rangeMonths,
                 scanIntensity: runConfiguration.intensity.rawValue,
                 excludedProviderMessageIds: excluded
+            )
+            await YearScanCoordinator.bridgePromotedFindingsToObligations(
+                environment: environment,
+                items: result.items
             )
         } catch {
             isScanning = false
