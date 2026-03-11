@@ -13,6 +13,13 @@ enum EmailContentBudget {
 }
 
 enum TextSanitizer {
+    private static let looseNumericEntityRegex = try? NSRegularExpression(
+        pattern: "&\\s*#\\s*([xX]?[0-9A-Fa-f\\s]+?)\\s*;"
+    )
+    private static let namedEntityRegex = try? NSRegularExpression(
+        pattern: "&\\s*([A-Za-z]{2,16})\\s*;"
+    )
+
     struct DetailText {
         let preview: String
         let full: String
@@ -29,7 +36,8 @@ enum TextSanitizer {
         let isTruncated = full.count > EmailContentBudget.detailPreviewCharsMax
         let preview: String
         if isTruncated {
-            let truncated = String(boundedFull.prefix(EmailContentBudget.detailPreviewCharsMax))
+            let previewBudget = max(0, EmailContentBudget.detailPreviewCharsMax - 1)
+            let truncated = String(boundedFull.prefix(previewBudget))
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             preview = truncated + "…"
         } else {
@@ -65,7 +73,7 @@ enum TextSanitizer {
     }
 
     static func sanitize(_ text: String) -> String {
-        var cleaned = text
+        var cleaned = stripExtractorArtifacts(text)
         cleaned = cleaned.replacingOccurrences(
             of: "(https?://|www\\.)\\S+",
             with: "",
@@ -86,7 +94,7 @@ enum TextSanitizer {
     }
 
     static func sanitizePreservingNewlines(_ text: String) -> String {
-        var cleaned = text
+        var cleaned = stripExtractorArtifacts(text)
         cleaned = cleaned.replacingOccurrences(
             of: "(https?://|www\\.)\\S+",
             with: "",
@@ -100,6 +108,16 @@ enum TextSanitizer {
         cleaned = cleaned.replacingOccurrences(
             of: "(?i)(gclid|fbclid|mc_eid|mc_cid)=\\S+",
             with: "",
+            options: .regularExpression
+        )
+        cleaned = cleaned.replacingOccurrences(
+            of: "[^\\S\\r\\n]+",
+            with: " ",
+            options: .regularExpression
+        )
+        cleaned = cleaned.replacingOccurrences(
+            of: "\\n{3,}",
+            with: "\n\n",
             options: .regularExpression
         )
         return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -116,5 +134,105 @@ enum TextSanitizer {
         }
         let text = attributed.string.trimmingCharacters(in: .whitespacesAndNewlines)
         return text.isEmpty ? nil : text
+    }
+
+    private static func stripExtractorArtifacts(_ text: String) -> String {
+        var cleaned = decodeLooseNumericEntities(in: text)
+        cleaned = decodeNamedEntities(in: cleaned)
+        cleaned = cleaned.replacingOccurrences(of: "\u{00A0}", with: " ")
+
+        var normalizedScalars: [UnicodeScalar] = []
+        normalizedScalars.reserveCapacity(cleaned.unicodeScalars.count)
+
+        for scalar in cleaned.unicodeScalars {
+            if scalar == "\n" || scalar == "\r" || scalar == "\t" {
+                normalizedScalars.append(scalar)
+                continue
+            }
+
+            if scalar.properties.isWhitespace {
+                normalizedScalars.append(" ")
+                continue
+            }
+
+            let category = scalar.properties.generalCategory
+            if category == .format || category == .control {
+                continue
+            }
+
+            normalizedScalars.append(scalar)
+        }
+
+        return String(String.UnicodeScalarView(normalizedScalars))
+    }
+
+    private static func decodeLooseNumericEntities(in text: String) -> String {
+        guard text.contains("&"), let regex = looseNumericEntityRegex else { return text }
+        let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
+        let matches = regex.matches(in: text, range: nsRange)
+        guard !matches.isEmpty else { return text }
+
+        var result = text
+        for match in matches.reversed() {
+            guard match.numberOfRanges >= 2,
+                  let fullRange = Range(match.range(at: 0), in: result),
+                  let codeRange = Range(match.range(at: 1), in: result) else {
+                continue
+            }
+            var code = String(result[codeRange])
+            code = code.replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
+
+            let scalarValue: UInt32?
+            if code.hasPrefix("x") || code.hasPrefix("X") {
+                scalarValue = UInt32(code.dropFirst(), radix: 16)
+            } else {
+                scalarValue = UInt32(code, radix: 10)
+            }
+            guard let value = scalarValue, let scalar = UnicodeScalar(value) else { continue }
+            result.replaceSubrange(fullRange, with: String(Character(scalar)))
+        }
+        return result
+    }
+
+    private static func decodeNamedEntities(in text: String) -> String {
+        guard text.contains("&"), let regex = namedEntityRegex else { return text }
+        let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
+        let matches = regex.matches(in: text, range: nsRange)
+        guard !matches.isEmpty else { return text }
+
+        var result = text
+        for match in matches.reversed() {
+            guard match.numberOfRanges >= 2,
+                  let fullRange = Range(match.range(at: 0), in: result),
+                  let nameRange = Range(match.range(at: 1), in: result) else {
+                continue
+            }
+            let name = String(result[nameRange]).lowercased()
+            guard let replacement = replacementForNamedEntity(name) else { continue }
+            result.replaceSubrange(fullRange, with: replacement)
+        }
+        return result
+    }
+
+    private static func replacementForNamedEntity(_ name: String) -> String? {
+        switch name {
+        case "nbsp": return " "
+        case "ensp": return " "
+        case "emsp": return " "
+        case "thinsp": return " "
+        case "hairsp": return " "
+        case "numsp": return " "
+        case "shy": return ""
+        case "zwnj": return ""
+        case "zwj": return ""
+        case "lrm": return ""
+        case "rlm": return ""
+        case "amp": return "&"
+        case "lt": return "<"
+        case "gt": return ">"
+        case "quot": return "\""
+        case "apos": return "'"
+        default: return nil
+        }
     }
 }

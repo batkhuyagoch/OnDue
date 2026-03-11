@@ -16,14 +16,16 @@ final class DigestViewModel: ObservableObject {
     @Published var undoBanner: UndoBanner?
     @Published var learningBanner: String?
     @Published var searchQuery: String = ""
+    @Published var selectedMode: DigestMode = .now
     @Published var selectedLens: ObligationLens = .active
     @Published var selectedGrouping: ObligationGrouping = .dueDate
-    @Published var showOverdueItems: Bool = false
+    @Published private(set) var isGlobalSearchActive = false
 
     private var pendingUndoTask: Task<Void, Never>?
     private var pendingLearningTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
     private var currentDigestRenderId: String = UUID().uuidString
+    private var activeLoadToken: UUID = UUID()
     private var exposureKeysLogged: Set<String> = []
     private var firstExposureByObligationId: [String: Date] = [:]
     var isEmpty: Bool {
@@ -34,6 +36,8 @@ final class DigestViewModel: ObservableObject {
     
     func loadDigest(using environment: AppEnvironment) async {
         self.environment = environment
+        let loadToken = UUID()
+        activeLoadToken = loadToken
         currentDigestRenderId = UUID().uuidString
         exposureKeysLogged = []
         firstExposureByObligationId = [:]
@@ -43,29 +47,30 @@ final class DigestViewModel: ObservableObject {
         
         do {
             let trimmedQuery = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+            let mode = selectedMode
+            let grouping = selectedGrouping
+            let filterSettings = DigestFilterSettings(from: environment.filterPreferencesStore)
+            let useGlobalSearch = !trimmedQuery.isEmpty
             let items: [ObligationListItem]
-            if trimmedQuery.isEmpty {
-                items = try await environment.obligationProjectionRepository.fetchItems(
-                    lens: selectedLens,
-                    query: "",
-                    limit: 200
-                )
+            if useGlobalSearch {
+                items = try await environment.obligationProjectionRepository.fetchItemsForGlobalSearch(query: trimmedQuery, limit: 500)
             } else {
-                items = try await environment.obligationProjectionRepository.fetchItems(
-                    lens: selectedLens,
-                    query: trimmedQuery,
-                    limit: 200
-                )
+                items = try await environment.obligationProjectionRepository.fetchItems(mode: mode, query: "", limit: 300)
             }
-            let filtered = items.filter { Self.shouldIncludeForDigest($0.obligation, preferences: environment.filterPreferencesStore) }
-            let visibilityFiltered = filtered.filter { item in
-                if selectedLens == .active, showOverdueItems == false, item.dueBucket == .overdue {
-                    return false
-                }
-                return true
-            }
-            sections = Self.buildSections(from: visibilityFiltered, grouping: selectedGrouping)
+            let builtSections = await Self.buildSectionsInBackground(
+                items: items,
+                useGlobalSearch: useGlobalSearch,
+                mode: mode,
+                grouping: grouping,
+                filterSettings: filterSettings
+            )
+            guard activeLoadToken == loadToken else { return }
+            isGlobalSearchActive = useGlobalSearch
+            sections = builtSections
+        } catch is CancellationError {
+            // View/task cancellation during navigation should not show user-facing errors.
         } catch {
+            guard activeLoadToken == loadToken else { return }
             self.error = error
             sections = []
         }
@@ -128,6 +133,8 @@ final class DigestViewModel: ObservableObject {
                     )
                 }
             }
+        } catch is CancellationError {
+            return
         } catch {
             self.error = error
         }
@@ -155,7 +162,9 @@ final class DigestViewModel: ObservableObject {
                 counter: "reviewCount"
             )
             showLearningBanner()
-            removeFromSections(obligation)
+            await loadDigest(using: environment)
+        } catch is CancellationError {
+            return
         } catch {
             self.error = error
         }
@@ -195,8 +204,10 @@ final class DigestViewModel: ObservableObject {
                 )
             }
             try await environment.obligationRepository.dismiss(id: obligation.id)
-            removeFromSections(obligation)
             scheduleUndo(for: obligation, action: .dismissed)
+            await loadDigest(using: environment)
+        } catch is CancellationError {
+            return
         } catch {
             self.error = error
         }
@@ -221,9 +232,9 @@ final class DigestViewModel: ObservableObject {
             )
             try await environment.obligationRepository.markReviewed(id: obligation.id)
             showLearningBanner()
-            if selectedLens == .needsReview {
-                removeFromSections(obligation)
-            }
+            await loadDigest(using: environment)
+        } catch is CancellationError {
+            return
         } catch {
             self.error = error
         }
@@ -247,9 +258,11 @@ final class DigestViewModel: ObservableObject {
                 counter: "acceptCount"
             )
             try await environment.obligationRepository.markDone(id: obligation.id)
-            removeFromSections(obligation)
             scheduleUndo(for: obligation, action: .accepted)
             showLearningBanner()
+            await loadDigest(using: environment)
+        } catch is CancellationError {
+            return
         } catch {
             self.error = error
         }
@@ -280,6 +293,8 @@ final class DigestViewModel: ObservableObject {
                 sender: sender
             )
             await loadDigest(using: environment)
+        } catch is CancellationError {
+            return
         } catch {
             self.error = error
         }
@@ -321,6 +336,8 @@ final class DigestViewModel: ObservableObject {
                 domain: domain
             )
             await loadDigest(using: environment)
+        } catch is CancellationError {
+            return
         } catch {
             self.error = error
         }
@@ -334,14 +351,6 @@ final class DigestViewModel: ObservableObject {
 
     // MARK: - Private Helpers
     
-    private func removeFromSections(_ obligation: ObligationItem) {
-        sections = sections.compactMap { section in
-            let filtered = section.items.filter { $0.obligation.id != obligation.id }
-            guard !filtered.isEmpty else { return nil }
-            return ObligationListSection(id: section.id, title: section.title, items: filtered)
-        }
-    }
-
     private func scheduleUndo(for obligation: ObligationItem, action: FeedbackRecord.FeedbackAction) {
         pendingUndoTask?.cancel()
 
@@ -365,6 +374,8 @@ final class DigestViewModel: ObservableObject {
         do {
             try await environment.obligationRepository.updateStatus(id: banner.obligation.id, status: .open)
             await loadDigest(using: environment)
+        } catch is CancellationError {
+            return
         } catch {
             self.error = error
         }
@@ -390,6 +401,150 @@ final class DigestViewModel: ObservableObject {
             return buildDetectionSections(items)
         case .sourceThread:
             return buildThreadSections(items)
+        }
+    }
+
+    private static func buildModeSections(
+        from items: [ObligationListItem],
+        mode: DigestMode,
+        grouping: ObligationGrouping
+    ) -> [ObligationListSection] {
+        let sortedByUrgency = items.sorted {
+            if $0.obligation.urgencyRank != $1.obligation.urgencyRank {
+                return $0.obligation.urgencyRank < $1.obligation.urgencyRank
+            }
+            return $0.obligation.confidence > $1.obligation.confidence
+        }
+
+        switch mode {
+        case .now:
+            var urgent: [ObligationListItem] = []
+            var needsConfirmation: [ObligationListItem] = []
+            var dueSoon: [ObligationListItem] = []
+            urgent.reserveCapacity(sortedByUrgency.count / 3)
+            needsConfirmation.reserveCapacity(sortedByUrgency.count / 3)
+            dueSoon.reserveCapacity(sortedByUrgency.count / 3)
+
+            for item in sortedByUrgency {
+                if item.state == .overdue || item.dueBucket == .today {
+                    urgent.append(item)
+                }
+                if item.state == .needsReview {
+                    needsConfirmation.append(item)
+                }
+                if item.state == .active && item.dueBucket == .next3Days {
+                    dueSoon.append(item)
+                }
+            }
+            return [
+                section(title: "Urgent", id: "now_urgent", items: urgent),
+                section(title: "Need Confirmation", id: "now_review", items: needsConfirmation),
+                section(title: "Due Soon", id: "now_due_soon", items: dueSoon)
+            ].compactMap { $0 }
+        case .later:
+            var upcoming: [ObligationListItem] = []
+            var snoozed: [ObligationListItem] = []
+            upcoming.reserveCapacity(sortedByUrgency.count / 2)
+            snoozed.reserveCapacity(sortedByUrgency.count / 4)
+
+            for item in sortedByUrgency {
+                if item.state == .active && (item.dueBucket == .next7Days || item.dueBucket == .later || item.dueBucket == .noDueDate) {
+                    upcoming.append(item)
+                }
+                if item.state == .snoozed {
+                    snoozed.append(item)
+                }
+            }
+            return [
+                section(title: "Upcoming", id: "later_upcoming", items: upcoming),
+                section(title: "Snoozed", id: "later_snoozed", items: snoozed)
+            ].compactMap { $0 }
+        case .done:
+            let now = Date()
+            var recent: [ObligationListItem] = []
+            var earlier: [ObligationListItem] = []
+            recent.reserveCapacity(sortedByUrgency.count / 4)
+            earlier.reserveCapacity(sortedByUrgency.count / 4)
+            let recencyWindow: TimeInterval = 7 * 24 * 60 * 60
+
+            for item in sortedByUrgency where item.state == .resolved {
+                if now.timeIntervalSince(item.obligation.updatedAt) <= recencyWindow {
+                    recent.append(item)
+                } else {
+                    earlier.append(item)
+                }
+            }
+            return [
+                section(title: "Completed Recently", id: "done_recent", items: recent),
+                section(title: "Completed Earlier", id: "done_earlier", items: earlier)
+            ].compactMap { $0 }
+        }
+    }
+
+    private static func buildGlobalSearchSections(_ items: [ObligationListItem]) -> [ObligationListSection] {
+        let sortedByModeThenUrgency = items.sorted { lhs, rhs in
+            let leftMode = modeRank(for: lhs)
+            let rightMode = modeRank(for: rhs)
+            if leftMode != rightMode {
+                return leftMode < rightMode
+            }
+            if lhs.obligation.urgencyRank != rhs.obligation.urgencyRank {
+                return lhs.obligation.urgencyRank < rhs.obligation.urgencyRank
+            }
+            return lhs.obligation.confidence > rhs.obligation.confidence
+        }
+        var nowItems: [ObligationListItem] = []
+        var laterItems: [ObligationListItem] = []
+        var doneItems: [ObligationListItem] = []
+        nowItems.reserveCapacity(sortedByModeThenUrgency.count / 3)
+        laterItems.reserveCapacity(sortedByModeThenUrgency.count / 3)
+        doneItems.reserveCapacity(sortedByModeThenUrgency.count / 3)
+
+        for item in sortedByModeThenUrgency {
+            switch mode(for: item) {
+            case .now:
+                nowItems.append(item)
+            case .later:
+                laterItems.append(item)
+            case .done:
+                doneItems.append(item)
+            }
+        }
+        return [
+            section(title: "Now", id: "search_now", items: nowItems),
+            section(title: "Later", id: "search_later", items: laterItems),
+            section(title: "Done", id: "search_done", items: doneItems)
+        ].compactMap { $0 }
+    }
+
+    private static func section(title: String, id: String, items: [ObligationListItem]) -> ObligationListSection? {
+        guard !items.isEmpty else { return nil }
+        return ObligationListSection(id: id, title: title, items: items)
+    }
+
+    private static func mode(for item: ObligationListItem) -> DigestMode {
+        switch item.state {
+        case .resolved:
+            return .done
+        case .snoozed:
+            return .later
+        case .overdue, .needsReview:
+            return .now
+        case .active:
+            if item.dueBucket == .today || item.dueBucket == .next3Days || item.dueBucket == .overdue {
+                return .now
+            }
+            return .later
+        case .suppressed:
+            return .done
+        }
+    }
+
+    private static func modeRank(for item: ObligationListItem) -> Int {
+        switch mode(for: item) {
+        case .now: return 0
+        case .later: return 1
+        case .done: return 2
         }
     }
 
@@ -429,9 +584,14 @@ final class DigestViewModel: ObservableObject {
 
     private static func buildThreadSections(_ items: [ObligationListItem]) -> [ObligationListSection] {
         let grouped = Dictionary(grouping: items) { $0.primaryThreadId ?? $0.obligation.id }
+        var latestByKey: [String: Date] = [:]
+        latestByKey.reserveCapacity(grouped.count)
+        for (key, threadItems) in grouped {
+            latestByKey[key] = threadItems.map { $0.lastActionAt ?? $0.obligation.updatedAt }.max() ?? .distantPast
+        }
         let orderedKeys = grouped.keys.sorted { lhs, rhs in
-            let lhsDate = grouped[lhs]?.map { $0.lastActionAt ?? $0.obligation.updatedAt }.max() ?? .distantPast
-            let rhsDate = grouped[rhs]?.map { $0.lastActionAt ?? $0.obligation.updatedAt }.max() ?? .distantPast
+            let lhsDate = latestByKey[lhs] ?? .distantPast
+            let rhsDate = latestByKey[rhs] ?? .distantPast
             return lhsDate > rhsDate
         }
 
@@ -459,16 +619,22 @@ final class DigestViewModel: ObservableObject {
     }
 
     static func shouldIncludeForDigest(_ item: ObligationItem, preferences: FilterPreferencesStoring) -> Bool {
-        evaluateDigestFilter(item, preferences: preferences).isIncluded
+        evaluateDigestFilter(
+            item,
+            settings: DigestFilterSettings(from: preferences)
+        ).isIncluded
     }
 
     static func digestFilterExplain(_ item: ObligationItem, preferences: FilterPreferencesStoring) -> String {
-        evaluateDigestFilter(item, preferences: preferences).debugMessage
+        evaluateDigestFilter(
+            item,
+            settings: DigestFilterSettings(from: preferences)
+        ).debugMessage
     }
 
     private static func evaluateDigestFilter(
         _ item: ObligationItem,
-        preferences: FilterPreferencesStoring
+        settings: DigestFilterSettings
     ) -> (isIncluded: Bool, debugMessage: String) {
         let combined = ([item.title, item.evidenceQuote] + item.matchedReasons).joined(separator: " ").lowercased()
         let matchedRuleSet = Set(item.matchedRuleIds)
@@ -476,18 +642,18 @@ final class DigestViewModel: ObservableObject {
         let reasonCode = item.reasonCode
         let isDeliveryAction = item.primaryHypothesisId == ObligationHypothesis.deliveryRequired.rawValue || reasonCode == .deliveryActionRequired
 
-        if preferences.includeSecurityAlerts == false,
+        if settings.includeSecurityAlerts == false,
            (reasonCode == .securityInformational
                 || combined.contains("password changed")
                 || combined.contains("sign-in attempt")
                 || combined.contains("security alert")) {
             return (false, "Excluded: security alerts disabled")
         }
-        if preferences.includeStatements == false,
+        if settings.includeStatements == false,
            (combined.contains("statement available") || combined.contains("monthly statement") || combined.contains("account statement")) {
             return (false, "Excluded: statements disabled")
         }
-        if preferences.includeMarketing == false {
+        if settings.includeMarketing == false {
             let hasMarketingRule = matchedRuleSet.contains(ObligationHypothesis.marketingNoise.rawValue)
             let hasMarketingHypothesis = item.primaryHypothesisId == ObligationHypothesis.marketingNoise.rawValue
             let hasMarketingReason = matchedReasonSet.contains(where: {
@@ -505,11 +671,11 @@ final class DigestViewModel: ObservableObject {
                 return (false, "Excluded: marketing disabled")
             }
         }
-        if preferences.includeNewsletters == false,
+        if settings.includeNewsletters == false,
            (combined.contains("newsletter") || combined.contains("announcement") || combined.contains("roundup")) {
             return (false, "Excluded: newsletters disabled")
         }
-        if preferences.includeShipping == false {
+        if settings.includeShipping == false {
             if isDeliveryAction {
                 return (true, "Included: delivery action override")
             }
@@ -523,6 +689,29 @@ final class DigestViewModel: ObservableObject {
             }
         }
         return (true, "Included: passes active filters")
+    }
+
+    private static func buildSectionsInBackground(
+        items: [ObligationListItem],
+        useGlobalSearch: Bool,
+        mode: DigestMode,
+        grouping: ObligationGrouping,
+        filterSettings: DigestFilterSettings
+    ) async -> [ObligationListSection] {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let filtered = items.filter {
+                    evaluateDigestFilter($0.obligation, settings: filterSettings).isIncluded
+                }
+                let sections: [ObligationListSection]
+                if useGlobalSearch {
+                    sections = buildGlobalSearchSections(filtered)
+                } else {
+                    sections = buildModeSections(from: filtered, mode: mode, grouping: grouping)
+                }
+                continuation.resume(returning: sections)
+            }
+        }
     }
 
     private func buildFeedbackRecord(
@@ -602,6 +791,22 @@ final class DigestViewModel: ObservableObject {
         guard let actionTimestamp,
               let exposure = firstExposureByObligationId[obligationId] else { return false }
         return actionTimestamp.timeIntervalSince(exposure) <= 120
+    }
+}
+
+private struct DigestFilterSettings: Sendable {
+    let includeSecurityAlerts: Bool
+    let includeStatements: Bool
+    let includeMarketing: Bool
+    let includeNewsletters: Bool
+    let includeShipping: Bool
+
+    init(from preferences: FilterPreferencesStoring) {
+        self.includeSecurityAlerts = preferences.includeSecurityAlerts
+        self.includeStatements = preferences.includeStatements
+        self.includeMarketing = preferences.includeMarketing
+        self.includeNewsletters = preferences.includeNewsletters
+        self.includeShipping = preferences.includeShipping
     }
 }
 

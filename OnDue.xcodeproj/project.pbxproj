@@ -16,9 +16,9 @@
 		9A28A7132F2A0001 /* RuleEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A28A7102F2A0001 /* RuleEngineTests.swift */; };
 		9A28A7142F2A0001 /* SampleEmails.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A28A7112F2A0001 /* SampleEmails.swift */; };
 		9A28A77A2F2B1001 /* TextSanitizerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A28A7792F2B1001 /* TextSanitizerTests.swift */; };
-		F2A100000000000000000015 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = F2A100000000000000000016 /* PrivacyInfo.xcprivacy */; };
 		F2A100000000000000000003 /* ObligationRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2A100000000000000000013 /* ObligationRepositoryTests.swift */; };
 		F2A100000000000000000004 /* ObligationExtractorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2A100000000000000000014 /* ObligationExtractorTests.swift */; };
+		F2A100000000000000000015 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = F2A100000000000000000016 /* PrivacyInfo.xcprivacy */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -42,9 +42,11 @@
 		9A28A7112F2A0001 /* SampleEmails.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleEmails.swift; sourceTree = "<group>"; };
 		9A28A7122F2A0001 /* OnDueTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = OnDueTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		9A28A7792F2B1001 /* TextSanitizerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextSanitizerTests.swift; sourceTree = "<group>"; };
-		F2A100000000000000000016 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		9A9ABA0E2F528EE000674B4F /* DocsARCHITECTURE.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = DocsARCHITECTURE.md; sourceTree = "<group>"; };
+		9A9ABA0F2F528F4000674B4F /* AppIconGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppIconGenerator.swift; sourceTree = "<group>"; };
 		F2A100000000000000000013 /* ObligationRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObligationRepositoryTests.swift; sourceTree = "<group>"; };
 		F2A100000000000000000014 /* ObligationExtractorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObligationExtractorTests.swift; sourceTree = "<group>"; };
+		F2A100000000000000000016 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -75,12 +77,10 @@
 			membershipExceptions = (
 				Connect/ConnectGmailView.swift,
 				Connect/ConnectGmailViewModel.swift,
-				Digest/DigestView.swift,
 				Digest/DigestViewModel.swift,
 				GoldDatasetLabelView.swift,
 				GoldDatasetLabelViewModel.swift,
 				Settings/SettingsView.swift,
-				YearScan/YearScanView.swift,
 				YearScan/YearScanViewModel.swift,
 			);
 			target = 9A28A4812F27AD0F00B0DB3C /* OnDue */;
@@ -99,6 +99,12 @@
 				Gmail/GmailClient.swift,
 				Gmail/GmailConfiguration.swift,
 				Gmail/GmailSyncService.swift,
+				Gmail/MessageStateDebugger.swift,
+				Gmail/MessageStateManager.swift,
+				Gmail/UserActionRecord.swift,
+				YearScan/DigestView_Redesigned.swift,
+				YearScan/RootView_Clean.swift,
+				YearScan/YearScanBannerState.swift,
 				YearScan/YearScanRunner.swift,
 			);
 			target = 9A28A4812F27AD0F00B0DB3C /* OnDue */;
@@ -129,6 +135,13 @@
 				YearScanSnapshot.swift,
 			);
 			target = 9A28A4812F27AD0F00B0DB3C /* OnDue */;
+		};
+		9A9AB9562F4D549B00674B4F /* Exceptions for "Services" folder in "OnDueTests" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Gmail/MessageStateTests.swift,
+			);
+			target = 9A28A7192F2A0001 /* OnDueTests */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
@@ -166,6 +179,7 @@
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
 				9A28A6172F28671200B0DB3C /* Exceptions for "Services" folder in "OnDue" target */,
+				9A9AB9562F4D549B00674B4F /* Exceptions for "Services" folder in "OnDueTests" target */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -218,6 +232,8 @@
 				F2A100000000000000000016 /* PrivacyInfo.xcprivacy */,
 				9A28A6702F29A3C300B0DB3C /* .gitignore */,
 				9A28A6792F29AE1000B0DB3C /* GoogleService-Info.plist */,
+				9A9ABA0E2F528EE000674B4F /* DocsARCHITECTURE.md */,
+				9A9ABA0F2F528F4000674B4F /* AppIconGenerator.swift */,
 			);
 			sourceTree = "<group>";
 		};

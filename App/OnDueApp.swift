@@ -17,15 +17,17 @@ struct OnDueApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView()
+            RootView_Clean()
                 .environmentObject(environmentStore)
                 .onOpenURL { url in
                     // Handle Google Sign-In callback
-                    GIDSignIn.sharedInstance.handle(url)
+                    // Only handle if it's a Google Sign-In URL
+                    if url.scheme == GmailConfiguration.reversedClientID {
+                        _ = GIDSignIn.sharedInstance.handle(url)
+                    }
                 }
                 .task {
-                    // Try to restore previous sign-in
-                    _ = try? await GmailAuthService.shared.restorePreviousSignIn()
+                    // Note: Session restore now happens in AuthenticationState.checkSignInStatus()
                     BackgroundSyncManager.scheduleIfEnabled(environment: environmentStore.value)
                     
                     // Setup daily digest notifications
@@ -35,21 +37,28 @@ struct OnDueApp: App {
     }
     
     private func setupNotifications() async {
-        // Setup notification categories and actions
+        // Setup notification categories and actions (always do this)
         DailyDigestScheduler.shared.setupNotificationCategories()
         
-        // Request permission (will show system alert if not already granted)
-        do {
-            try await DailyDigestScheduler.shared.requestAuthorization()
+        // Check if user has previously enabled daily digest
+        let dailyDigestEnabled = UserDefaults.standard.bool(forKey: "notifications.dailyDigest.enabled")
+        
+        if dailyDigestEnabled {
+            // User has opted in - restore their schedule
+            let hour = UserDefaults.standard.integer(forKey: "notifications.dailyDigest.hour")
+            let minute = UserDefaults.standard.integer(forKey: "notifications.dailyDigest.minute")
             
-            // Schedule daily digest at 9 AM by default
-            try await DailyDigestScheduler.shared.scheduleDailyDigest(
-                at: DateComponents(hour: 9, minute: 0)
-            )
-        } catch {
-            // Permission denied or other error - fail silently
-            // User can enable later in Settings
-            print("Notification setup skipped: \(error)")
+            // Use default 9 AM if not set
+            let finalHour = hour == 0 && minute == 0 ? 9 : hour
+            
+            do {
+                try await DailyDigestScheduler.shared.scheduleDailyDigest(
+                    at: DateComponents(hour: finalHour, minute: minute)
+                )
+            } catch {
+                print("Failed to restore notification schedule: \(error)")
+            }
         }
+        // If not enabled, do nothing - let user enable in Settings
     }
 }

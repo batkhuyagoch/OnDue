@@ -2,7 +2,7 @@ import Foundation
 import GRDB
 
 enum Migrations {
-    static func register(_ migrator: inout DatabaseMigrator) {
+    nonisolated static func register(_ migrator: inout DatabaseMigrator) {
         
         migrator.registerMigration("v1_initial") { db in
             
@@ -548,6 +548,84 @@ enum Migrations {
                 UPDATE obligation_projection
                 SET policyVersion = COALESCE(NULLIF(policyVersion, ''), 'v2_policy_driven')
             """)
+        }
+
+        migrator.registerMigration("v22_year_scan_resume_state") { db in
+            try db.alter(table: "year_scan_state") { t in
+                t.add(column: "lastPaused", .datetime)
+                t.add(column: "resumeStateJSON", .text)
+            }
+        }
+        
+        // MARK: - v23: Local message state management
+        
+        migrator.registerMigration("v23_user_actions") { db in
+            try db.create(table: "user_actions") { t in
+                t.column("id", .text).primaryKey()
+                t.column("messageID", .text).notNull().indexed()
+                t.column("actionType", .text).notNull()
+                t.column("actionData", .text)
+                t.column("timestamp", .date).notNull().indexed()
+                t.column("synced", .boolean).notNull().defaults(to: false)
+            }
+            
+            // Create indexes for common queries
+            try db.create(index: "idx_user_actions_messageID_timestamp", 
+                         on: "user_actions", 
+                         columns: ["messageID", "timestamp"])
+            try db.create(index: "idx_user_actions_actionType", 
+                         on: "user_actions", 
+                         columns: ["actionType"])
+            try db.create(index: "idx_user_actions_synced", 
+                         on: "user_actions", 
+                         columns: ["synced"])
+        }
+
+        migrator.registerMigration("v24_year_scan_configuration") { db in
+            try db.alter(table: "year_scan_state") { t in
+                t.add(column: "scanRangeMonths", .integer).notNull().defaults(to: 12)
+                t.add(column: "scanIntensity", .text).notNull().defaults(to: "balanced")
+            }
+        }
+
+        migrator.registerMigration("v25_long_scan_output_contract") { db in
+            let existingColumns = try db.columns(in: "year_scan_result").map(\.name)
+            var addedConfidenceColumn = false
+
+            if !existingColumns.contains("source") {
+                try db.alter(table: "year_scan_result") { t in
+                    t.add(column: "source", .text).notNull().defaults(to: LongScanSource.scan.rawValue)
+                }
+            }
+            if !existingColumns.contains("promotionDecision") {
+                try db.alter(table: "year_scan_result") { t in
+                    t.add(column: "promotionDecision", .text).notNull().defaults(to: LongScanPromotionDecision.promoted.rawValue)
+                }
+            }
+            if !existingColumns.contains("promotionReasonCode") {
+                try db.alter(table: "year_scan_result") { t in
+                    t.add(column: "promotionReasonCode", .text).notNull().defaults(to: LongScanPromotionReasonCode.promotedActionable.rawValue)
+                }
+            }
+            if !existingColumns.contains("confidence") {
+                try db.alter(table: "year_scan_result") { t in
+                    t.add(column: "confidence", .double).notNull().defaults(to: 0.8)
+                }
+                addedConfidenceColumn = true
+            }
+            if !existingColumns.contains("dueDate") {
+                try db.alter(table: "year_scan_result") { t in
+                    t.add(column: "dueDate", .datetime)
+                }
+            }
+
+            if addedConfidenceColumn {
+                try db.execute(sql: """
+                    UPDATE year_scan_result
+                    SET confidence = min(1.0, max(0.0, score / 2.0));
+                """)
+            }
+            try db.create(index: "year_scan_result_promotion_decision", on: "year_scan_result", columns: ["promotionDecision"])
         }
     }
 }

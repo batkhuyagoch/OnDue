@@ -80,7 +80,9 @@ final class ObligationRepository: ObligationRepositorying, @unchecked Sendable {
 
             for (mailboxAccountId, group) in grouped {
                 let obligationKeys = Array(Set(group.map { $0.obligationKey }))
-                var existingByKey: [String: (id: String, createdAt: Date, repeatCount: Int, lastSeenAt: Date?)] = [:]
+                let messagePks = Set(group.map(\.messagePk))
+                var existingByKey: [String: (id: String, createdAt: Date, repeatCount: Int, lastSeenAt: Date?, status: ObligationStatus, resolvedAt: Date?, snoozedUntil: Date?)] = [:]
+                let primaryThreadIdByMessagePk = try Self.fetchPrimaryThreadIds(messagePks: messagePks, db: db)
 
                 var start = 0
                 while start < obligationKeys.count {
@@ -88,7 +90,7 @@ final class ObligationRepository: ObligationRepositorying, @unchecked Sendable {
                     let chunk = Array(obligationKeys[start..<end])
                     let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ",")
                     let sql = """
-                        SELECT obligationKey, id, createdAt, repeatCount, lastSeenAt
+                        SELECT obligationKey, id, createdAt, repeatCount, lastSeenAt, status, resolvedAt, snoozedUntil
                         FROM obligation
                         WHERE mailboxAccountId = ?
                           AND obligationKey IN (\(placeholders))
@@ -102,11 +104,18 @@ final class ObligationRepository: ObligationRepositorying, @unchecked Sendable {
                            let createdAt: Date = row["createdAt"] {
                             let repeatCount: Int = row["repeatCount"] ?? 1
                             let lastSeenAt: Date? = row["lastSeenAt"]
+                            let statusRaw: String? = row["status"]
+                            let status = statusRaw.flatMap { ObligationStatus(rawValue: $0) } ?? .open
+                            let resolvedAt: Date? = row["resolvedAt"]
+                            let snoozedUntil: Date? = row["snoozedUntil"]
                             existingByKey[obligationKey] = (
                                 id: id,
                                 createdAt: createdAt,
                                 repeatCount: repeatCount,
-                                lastSeenAt: lastSeenAt
+                                lastSeenAt: lastSeenAt,
+                                status: status,
+                                resolvedAt: resolvedAt,
+                                snoozedUntil: snoozedUntil
                             )
                         }
                     }
@@ -115,7 +124,8 @@ final class ObligationRepository: ObligationRepositorying, @unchecked Sendable {
                 }
 
                 if !existingByKey.isEmpty {
-                    print("📌 ObligationRepository.save: \(mailboxAccountId) found \(existingByKey.count) existing obligations; will update instead of insert")
+                    let dismissed = existingByKey.values.filter { $0.status == .dismissed || $0.status == .done }.count
+                    Logger.info("ObligationRepository.save: \(mailboxAccountId) found \(existingByKey.count) existing obligations (dismissed/done: \(dismissed)); will preserve status")
                 }
 
                 let groupedByKey = Dictionary(grouping: group, by: { $0.obligationKey })
@@ -137,6 +147,12 @@ final class ObligationRepository: ObligationRepositorying, @unchecked Sendable {
                         record.createdAt = existing.createdAt
                         record.updatedAt = Date()
                         record.repeatCount = existing.repeatCount + incomingCount
+                        
+                        // Preserve user actions: status, resolvedAt, snoozedUntil
+                        record.status = existing.status
+                        record.resolvedAt = existing.resolvedAt
+                        record.snoozedUntil = existing.snoozedUntil
+                        
                         if let existingSeen = existing.lastSeenAt, let newSeen = record.lastSeenAt {
                             record.lastSeenAt = max(existingSeen, newSeen)
                         } else if existing.lastSeenAt != nil {
@@ -146,7 +162,11 @@ final class ObligationRepository: ObligationRepositorying, @unchecked Sendable {
 
                     try record.validateCanonicalDecisionInvariants()
                     try record.save(db)
-                    try self.projectionRepository?.upsert(obligation: record, in: db)
+                    try self.projectionRepository?.upsert(
+                        obligation: record,
+                        in: db,
+                        precomputedPrimaryThreadId: primaryThreadIdByMessagePk[record.messagePk]
+                    )
                 }
             }
         }
@@ -334,6 +354,42 @@ final class ObligationRepository: ObligationRepositorying, @unchecked Sendable {
 }
 
 private extension ObligationRepository {
+    static func fetchPrimaryThreadIds(
+        messagePks: Set<Int64>,
+        db: GRDB.Database
+    ) throws -> [Int64: String] {
+        guard !messagePks.isEmpty else { return [:] }
+        let ids = Array(messagePks)
+        let maxChunkSize = 400
+        var start = 0
+        var result: [Int64: String] = [:]
+
+        while start < ids.count {
+            let end = min(start + maxChunkSize, ids.count)
+            let chunk = Array(ids[start..<end])
+            let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ",")
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT pk, threadId, providerMessageId
+                    FROM message
+                    WHERE pk IN (\(placeholders))
+                """,
+                arguments: StatementArguments(chunk)
+            )
+            for row in rows {
+                guard let pk: Int64 = row["pk"] else { continue }
+                let threadId: String? = row["threadId"]
+                let providerMessageId: String? = row["providerMessageId"]
+                if let resolved = threadId ?? providerMessageId {
+                    result[pk] = resolved
+                }
+            }
+            start = end
+        }
+        return result
+    }
+
     static func makeFtsQuery(from input: String) -> String {
         let rawTokens = input
             .lowercased()

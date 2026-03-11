@@ -146,7 +146,12 @@ private final class MessageRepositoryStub: MessageRepositorying, @unchecked Send
     ) async throws -> [MessageRecord] { [] }
     func fetchByPk(_ pk: Int64) async throws -> MessageRecord? { nil }
     func fetchByProviderMessageId(_ providerMessageId: String) async throws -> MessageRecord? { message }
+    func fetchByProviderMessageIds(mailboxAccountId: String, providerMessageIds: Set<String>) async throws -> [MessageRecord] {
+        guard let message, providerMessageIds.contains(message.providerMessageId) else { return [] }
+        return [message]
+    }
     func fetchProviderMessageIdsWithBodyText(mailboxAccountId: String, providerMessageIds: [String]) async throws -> Set<String> { [] }
+    func fetchProviderMessageIdsWithBody(mailboxAccountId: String, providerMessageIds: Set<String>) async throws -> Set<String> { [] }
     func search(query: String, mailboxAccountId: String, limit: Int) async throws -> [MessageRecord] { [] }
     func softDeleteOlderThan(mailboxAccountId: String, daysBack: Int) async throws -> Int { 0 }
     func deleteAll(for mailboxAccountId: String) async throws -> Int { 0 }

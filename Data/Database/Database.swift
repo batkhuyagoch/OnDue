@@ -23,12 +23,30 @@ final class Database {
 
     static var initializationError: Error?
     
-    init(inMemory: Bool = false) throws {
+    nonisolated init(inMemory: Bool = false) throws {
         var config = Configuration()
         config.foreignKeysEnabled = true
+        
+        // Mobile-optimized: Balance performance with battery/thermal constraints
+        config.maximumReaderCount = 3  // Limit concurrent reads (was 5, too aggressive for mobile)
+        config.busyMode = .timeout(3.0)  // Shorter timeout for mobile responsiveness
+        
         if !inMemory {
             config.prepareDatabase { db in
+                // WAL mode for concurrent reads/writes
                 try db.execute(sql: "PRAGMA journal_mode=WAL")
+                
+                // Mobile-optimized performance settings
+                try db.execute(sql: "PRAGMA synchronous=NORMAL")  // Fast + safe in WAL
+                try db.execute(sql: "PRAGMA cache_size=-8000")    // 8MB cache (not 64MB!)
+                try db.execute(sql: "PRAGMA temp_store=MEMORY")   // Temp tables in memory
+                try db.execute(sql: "PRAGMA mmap_size=67108864")  // 64MB mmap (not 256MB!)
+                
+                // Mobile-specific: Prevent checkpoint stalls
+                try db.execute(sql: "PRAGMA wal_autocheckpoint=100")  // Checkpoint every 100 pages
+                
+                // Query optimization
+                try db.execute(sql: "PRAGMA automatic_index=ON")
             }
         }
 
@@ -53,7 +71,7 @@ final class Database {
         try migrate()
     }
     
-    private func migrate() throws {
+    nonisolated private func migrate() throws {
         var migrator = DatabaseMigrator()
         
         #if DEBUG
@@ -88,5 +106,21 @@ extension Database {
     /// Perform an async write operation
     func writeAsync<T: Sendable>(_ block: @Sendable @escaping (GRDB.Database) throws -> T) async throws -> T {
         try await dbPool.write(block)
+    }
+    
+    /// Checkpoint the WAL file to prevent it from growing too large
+    /// Call this periodically (e.g., after large syncs)
+    func checkpoint() async throws {
+        try await dbPool.writeWithoutTransaction { db in
+            try db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE)")
+        }
+    }
+    
+    /// Optimize database (should be called periodically, e.g., weekly)
+    func optimize() async throws {
+        try await dbPool.write { db in
+            try db.execute(sql: "PRAGMA optimize")
+            try db.execute(sql: "ANALYZE")
+        }
     }
 }

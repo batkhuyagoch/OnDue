@@ -74,7 +74,7 @@ final class GmailSyncService: GmailSyncServicing, @unchecked Sendable {
     
     init(
         database: Database,
-        client: GmailClienting = GmailClient(),
+        client: GmailClienting = GmailClient(stateManager: MessageStateManager()),
         candidateSelector: CandidateSelecting = CandidateSelector(preferences: FilterPreferencesStore())
     ) {
         self.database = database
@@ -150,7 +150,8 @@ final class GmailSyncService: GmailSyncServicing, @unchecked Sendable {
         return GmailIncrementalSyncResult(
             messageIDsCount: result.messageIDs.count,
             messagesSavedCount: messages.count,
-            latestHistoryId: result.latestHistoryId
+            latestHistoryId: result.latestHistoryId,
+            changedMessageIDs: Set(allIds)
         )
     }
 
@@ -300,12 +301,21 @@ final class GmailSyncCoordinator: GmailSyncCoordinating, @unchecked Sendable {
             )
         }
 
-        let recentMessages = try await messageRepository.fetchRecent(
-            mailboxAccountId: mailboxAccountId,
-            daysBack: daysBack
-        )
+        let extractionMessages: [MessageRecord]
+        if let changedIDs = incrementalResult?.changedMessageIDs, !changedIDs.isEmpty {
+            extractionMessages = try await messageRepository.fetchByProviderMessageIds(
+                mailboxAccountId: mailboxAccountId,
+                providerMessageIds: changedIDs
+            )
+        } else {
+            extractionMessages = try await messageRepository.fetchRecent(
+                mailboxAccountId: mailboxAccountId,
+                daysBack: daysBack
+            )
+        }
+
         let obligations = try await obligationExtractor.extract(
-            from: recentMessages,
+            from: extractionMessages,
             mailboxAccountId: mailboxAccountId
         )
         try await obligationRepository.save(obligations)
@@ -405,6 +415,7 @@ struct GmailIncrementalSyncResult {
     let messageIDsCount: Int
     let messagesSavedCount: Int
     let latestHistoryId: String?
+    let changedMessageIDs: Set<String>
 }
 
 struct SyncReport {

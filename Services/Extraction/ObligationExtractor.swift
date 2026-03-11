@@ -156,16 +156,6 @@ final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
 
         for message in messages {
             guard let pk = message.pk else { continue }
-            if let suppressionRepository {
-                let blocked = (try? await suppressionRepository.isBlocked(
-                    mailboxAccountId: mailboxAccountId,
-                    sender: message.fromEmail,
-                    domain: message.fromDomain
-                )) ?? false
-                if blocked {
-                    continue
-                }
-            }
             let parsedEmail = parser.parse(message: message)
             let legacy = ruleEngine.evaluateYearScanLegacy(email: parsedEmail)
             let migrated = ruleEngine.evaluateYearScan(email: parsedEmail)
@@ -181,6 +171,17 @@ final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
                 )
             }
             guard let assessment = migrated else { continue }
+
+            let blockedBySuppression: Bool
+            if let suppressionRepository {
+                blockedBySuppression = (try? await suppressionRepository.isBlocked(
+                    mailboxAccountId: mailboxAccountId,
+                    sender: message.fromEmail,
+                    domain: message.fromDomain
+                )) ?? false
+            } else {
+                blockedBySuppression = false
+            }
             try? await hypothesisMetricsRepository.increment(
                 mailboxAccountId: mailboxAccountId,
                 profile: .yearScanHighPrecision,
@@ -189,19 +190,34 @@ final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
             )
             let threadKey = message.threadId ?? message.providerMessageId
 
+            let displaySnippet = bestDisplaySnippet(
+                snippet: parsedEmail.snippet,
+                evidence: assessment.evidenceQuote,
+                subject: parsedEmail.subject
+            )
+
+            let promotion = mapLongScanPromotionDecision(
+                assessment: assessment,
+                blockedBySuppression: blockedBySuppression
+            )
             let item = YearScanItem(
                 mailboxAccountId: mailboxAccountId,
                 messagePk: pk,
                 providerMessageId: message.providerMessageId,
                 threadId: message.threadId,
                 subject: message.subject,
-                snippet: message.snippet ?? assessment.evidenceQuote,
+                snippet: displaySnippet,
                 score: assessment.score,
-                matchedReasons: assessment.matchedReasons
+                matchedReasons: assessment.matchedReasons,
+                source: .scan,
+                promotionDecision: promotion.decision,
+                promotionReasonCode: promotion.reasonCode,
+                confidence: assessment.confidence,
+                dueDate: assessment.deadline
             )
 
             if let existing = bestByThread[threadKey] {
-                if item.score > existing.score {
+                if item.isHigherPriority(than: existing) {
                     bestByThread[threadKey] = item
                 }
             } else {
@@ -209,7 +225,64 @@ final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
             }
         }
 
-        return bestByThread.values.sorted { $0.score > $1.score }
+        return bestByThread.values.sorted { lhs, rhs in
+            if lhs.promotionDecision != rhs.promotionDecision {
+                return lhs.isHigherPriority(than: rhs)
+            }
+            if lhs.score != rhs.score {
+                return lhs.score > rhs.score
+            }
+            return lhs.detectedAt > rhs.detectedAt
+        }
+    }
+
+    private func mapLongScanPromotionDecision(
+        assessment: RuleAssessment,
+        blockedBySuppression: Bool
+    ) -> (decision: LongScanPromotionDecision, reasonCode: LongScanPromotionReasonCode) {
+        if blockedBySuppression {
+            return (.dropped, .suppressed)
+        }
+
+        // Precision-first guardrail for long scans.
+        if assessment.confidence < 0.62 {
+            return (.dropped, .lowConfidence)
+        }
+
+        guard assessment.deadline != nil else {
+            if assessment.confidence >= 0.80 {
+                return (.expectedEvent, .convertedExpectedEvent)
+            }
+            return (.dropped, .missingDueDate)
+        }
+
+        return (.promoted, .promotedActionable)
+    }
+
+    private func bestDisplaySnippet(snippet: String, evidence: String, subject: String) -> String {
+        let orderedCandidates = [snippet, evidence, subject]
+        for candidate in orderedCandidates {
+            let normalized = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            if isUsableDisplayText(normalized) {
+                return normalized
+            }
+        }
+        return subject.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func isUsableDisplayText(_ value: String) -> Bool {
+        guard !value.isEmpty else { return false }
+        let visibleScalars = value.unicodeScalars.filter { scalar in
+            let category = scalar.properties.generalCategory
+            if category == .control || category == .format {
+                return false
+            }
+            return !scalar.properties.isWhitespace
+        }
+        guard !visibleScalars.isEmpty else { return false }
+        let visibleText = String(String.UnicodeScalarView(visibleScalars))
+        let alphaNumericCount = visibleText.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.count
+        return alphaNumericCount >= 4
     }
 
     private func isPreferred(_ candidate: RuleAssessment, over existing: RuleAssessment) -> Bool {

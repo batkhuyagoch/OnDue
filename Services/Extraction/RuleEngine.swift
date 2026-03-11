@@ -675,11 +675,14 @@ final class RuleEngine {
     }
 
     private func makeEvidenceQuote(from email: ParsedEmail) -> String {
-        let snippet = email.snippet.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !snippet.isEmpty {
-            return String(snippet.prefix(140))
+        let candidates = [email.snippet, email.subject, email.bodyText]
+        for candidate in candidates {
+            let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return String(trimmed.prefix(140))
+            }
         }
-        return String(email.subject.prefix(140))
+        return ""
     }
 
     private func buildAssessment(
@@ -710,10 +713,8 @@ final class RuleEngine {
             }
         }
 
-        var deadline: Date?
-        if includeDate {
-            deadline = DateParsing.parseDate(from: email.normalizedText)
-            if deadline != nil {
+        let parsedDeadline = includeDate ? DateParsing.parseDate(from: email.normalizedText) : nil
+        if includeDate, parsedDeadline != nil {
                 score += 0.5
                 categoryScores[.deadline, default: 0.0] += 0.5
                 matches.append(
@@ -725,7 +726,6 @@ final class RuleEngine {
                         category: .deadline
                     )
                 )
-            }
         }
 
         let preferredCategory = categoryScores.max(by: { $0.value < $1.value })?.key ?? .other
@@ -757,7 +757,7 @@ final class RuleEngine {
             risk: risk,
             confidence: confidence,
             evidenceQuote: evidenceQuote,
-            deadline: deadline,
+            deadline: parsedDeadline,
             matchedSignalIds: matches.map(\.id),
             matchedRuleIds: matches.map(\.id),
             matchedSignalTypes: matches.map(\.signalType),
@@ -780,7 +780,8 @@ final class RuleEngine {
         reviewCalibration: HypothesisReviewCalibrationSnapshot,
         reviewContext: HypothesisReviewContext
     ) -> RuleAssessment {
-        let matchedSignals = matchSignals(email: email, includeDate: true)
+        let parsedDeadline = DateParsing.parseDate(from: email.normalizedText)
+        let matchedSignals = matchSignals(email: email, includeDate: true, parsedDeadline: parsedDeadline)
         let matchedIds = Set(matchedSignals.map(\.id))
         let matchedSignalTypes = Array(Set(matchedSignals.map(\.signalType)))
 
@@ -802,7 +803,7 @@ final class RuleEngine {
                 risk: .low,
                 confidence: 0.3,
                 evidenceQuote: makeEvidenceQuote(from: email),
-                deadline: DateParsing.parseDate(from: email.normalizedText),
+                deadline: parsedDeadline,
                 matchedSignalIds: matchedSignals.map(\.id),
                 matchedRuleIds: [ObligationHypothesis.marketingNoise.rawValue],
                 matchedSignalTypes: matchedSignalTypes,
@@ -857,7 +858,6 @@ final class RuleEngine {
         )
         let category = determineCategory(from: matchedSignals, evaluations: evaluations)
         let risk = determineRisk(evaluations: evaluations)
-        let deadline = DateParsing.parseDate(from: email.normalizedText)
         emitMetrics(
             profile: profile,
             evaluations: evaluations,
@@ -873,7 +873,7 @@ final class RuleEngine {
             risk: risk,
             confidence: confidence,
             evidenceQuote: makeEvidenceQuote(from: email),
-            deadline: deadline,
+            deadline: parsedDeadline,
             matchedSignalIds: Array(matchedIds).sorted(),
             matchedRuleIds: evaluations.map { $0.hypothesis.rawValue },
             matchedSignalTypes: matchedSignalTypes,
@@ -899,7 +899,7 @@ final class RuleEngine {
         let category: ObligationCategory?
     }
 
-    private func matchSignals(email: ParsedEmail, includeDate: Bool) -> [MatchedSignal] {
+    private func matchSignals(email: ParsedEmail, includeDate: Bool, parsedDeadline: Date? = nil) -> [MatchedSignal] {
         var matched: [MatchedSignal] = []
         for signal in signals where signal.matches(email) {
             matched.append(
@@ -911,7 +911,8 @@ final class RuleEngine {
                 )
             )
         }
-        if includeDate, DateParsing.parseDate(from: email.normalizedText) != nil {
+        let resolvedDeadline = parsedDeadline ?? (includeDate ? DateParsing.parseDate(from: email.normalizedText) : nil)
+        if includeDate, resolvedDeadline != nil {
             matched.append(
                 MatchedSignal(
                     id: "date_detected",
@@ -1085,7 +1086,8 @@ final class RuleEngine {
     }
 
     func confidenceLabel(for email: ParsedEmail) -> String {
-        let matchedSignals = matchSignals(email: email, includeDate: true)
+        let parsedDeadline = DateParsing.parseDate(from: email.normalizedText)
+        let matchedSignals = matchSignals(email: email, includeDate: true, parsedDeadline: parsedDeadline)
         let matchedIds = Set(matchedSignals.map(\.id))
         let evaluations = evaluateHypotheses(matchedIds: matchedIds, matchedSignals: matchedSignals, profile: .digest)
         let top = evaluations.map(\.confidence).sorted(by: { confidenceRank($0) > confidenceRank($1) }).first

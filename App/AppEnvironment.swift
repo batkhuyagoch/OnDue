@@ -2,6 +2,7 @@ import SwiftUI
 import Combine
 
 struct AppEnvironment {
+    let database: Database
     let gmailAuthService: GmailAuthServicing
     let gmailSyncService: GmailSyncServicing
     let gmailSyncCoordinator: GmailSyncCoordinating
@@ -21,11 +22,13 @@ struct AppEnvironment {
     let candidateScoreRepository: CandidateScoreRepositorying
     let yearScanRepository: YearScanRepositorying
     let suppressionRepository: SuppressionRepositorying
+    let messageStateManager: MessageStateManager
 
     static func live() -> AppEnvironment {
         let database = Database.shared
         let filterPreferencesStore = FilterPreferencesStore()
         let suppressionRepository = SuppressionRepository(database: database)
+        let messageStateManager = MessageStateManager(database: database)
         let gmailSyncService = GmailSyncService(
             database: database,
             candidateSelector: CandidateSelector(
@@ -54,6 +57,7 @@ struct AppEnvironment {
         let yearScanRepository = YearScanRepository(database: database)
         let syncPolicyStore = SyncPolicyStore()
         return AppEnvironment(
+            database: database,
             gmailAuthService: GmailAuthService.shared,
             gmailSyncService: gmailSyncService,
             gmailSyncCoordinator: GmailSyncCoordinator(
@@ -93,7 +97,8 @@ struct AppEnvironment {
             ruleWeightRepository: ruleWeightRepository,
             candidateScoreRepository: candidateScoreRepository,
             yearScanRepository: yearScanRepository,
-            suppressionRepository: suppressionRepository
+            suppressionRepository: suppressionRepository,
+            messageStateManager: messageStateManager
         )
     }
 }

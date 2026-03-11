@@ -54,6 +54,7 @@ final class GmailClient: GmailClienting, @unchecked Sendable {
     
     private let baseURL = "https://gmail.googleapis.com/gmail/v1"
     private let authService: GmailAuthServicing
+    private let stateManager: MessageStateManager
     static var maxTotalMessagesPerSlice: Int = 100_000
 
     // MARK: - Quota protection
@@ -63,8 +64,10 @@ final class GmailClient: GmailClienting, @unchecked Sendable {
     private static let pacingDelayBetweenBatches: UInt64 = 100_000_000  // 100ms
     private static let pacingDelayBetweenSlices: UInt64 = 200_000_000   // 200ms
 
-    init(authService: GmailAuthServicing = GmailAuthService.shared) {
+    init(authService: GmailAuthServicing = GmailAuthService.shared,
+         stateManager: MessageStateManager = MessageStateManager()) {
         self.authService = authService
+        self.stateManager = stateManager
     }
 
     private func log(_ message: String, fields: [String: CustomStringConvertible] = [:]) {

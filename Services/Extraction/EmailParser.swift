@@ -13,14 +13,17 @@ struct ParsedEmail: Hashable {
 }
 
 final class EmailParser {
+    private static let numericEntityRegex = try? NSRegularExpression(pattern: "&#(x?[0-9A-Fa-f]+);")
+    private static let namedEntityRegex = try? NSRegularExpression(pattern: "&([A-Za-z]{2,16});")
+
     func parse(message: MessageRecord) -> ParsedEmail {
-        let subject = message.subject
-        let snippet = message.snippet ?? ""
+        let subject = cleanExtractorArtifacts(message.subject)
+        let snippet = cleanExtractorArtifacts(message.snippet ?? "")
         let rawBody: String
         if let bodyText = message.bodyText, !bodyText.isEmpty {
-            rawBody = bodyText
+            rawBody = cleanExtractorArtifacts(bodyText)
         } else if let bodyHtml = message.bodyHtml, !bodyHtml.isEmpty {
-            rawBody = htmlToText(bodyHtml) ?? ""
+            rawBody = cleanExtractorArtifacts(htmlToText(bodyHtml) ?? "")
         } else {
             rawBody = ""
         }
@@ -221,5 +224,104 @@ final class EmailParser {
         decoded = decoded.replacingOccurrences(of: "=3D", with: "=")
         decoded = decoded.replacingOccurrences(of: "=20", with: " ")
         return decoded
+    }
+
+    private func cleanExtractorArtifacts(_ text: String) -> String {
+        var cleaned = decodeNumericHTMLEntities(in: text)
+        cleaned = decodeNamedHTMLEntities(in: cleaned)
+        cleaned = cleaned.replacingOccurrences(of: "\u{00A0}", with: " ")
+
+        var normalizedScalars: [UnicodeScalar] = []
+        normalizedScalars.reserveCapacity(cleaned.unicodeScalars.count)
+
+        for scalar in cleaned.unicodeScalars {
+            if scalar == "\n" || scalar == "\r" || scalar == "\t" {
+                normalizedScalars.append(scalar)
+                continue
+            }
+
+            if scalar.properties.isWhitespace {
+                normalizedScalars.append(" ")
+                continue
+            }
+
+            let category = scalar.properties.generalCategory
+            if category == .format || category == .control {
+                continue
+            }
+
+            normalizedScalars.append(scalar)
+        }
+        return String(String.UnicodeScalarView(normalizedScalars))
+    }
+
+    private func decodeNumericHTMLEntities(in text: String) -> String {
+        guard text.contains("&#"), let regex = Self.numericEntityRegex else {
+            return text
+        }
+        let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
+        let matches = regex.matches(in: text, range: nsRange)
+        guard !matches.isEmpty else { return text }
+
+        var result = text
+        for match in matches.reversed() {
+            guard match.numberOfRanges >= 2,
+                  let fullRange = Range(match.range(at: 0), in: result),
+                  let codeRange = Range(match.range(at: 1), in: result) else {
+                continue
+            }
+            let code = String(result[codeRange])
+            let scalarValue: UInt32?
+            if code.hasPrefix("x") || code.hasPrefix("X") {
+                scalarValue = UInt32(code.dropFirst(), radix: 16)
+            } else {
+                scalarValue = UInt32(code, radix: 10)
+            }
+            guard let value = scalarValue, let scalar = UnicodeScalar(value) else { continue }
+            result.replaceSubrange(fullRange, with: String(Character(scalar)))
+        }
+        return result
+    }
+
+    private func decodeNamedHTMLEntities(in text: String) -> String {
+        guard text.contains("&"), let regex = Self.namedEntityRegex else {
+            return text
+        }
+        let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
+        let matches = regex.matches(in: text, range: nsRange)
+        guard !matches.isEmpty else { return text }
+
+        var result = text
+        for match in matches.reversed() {
+            guard match.numberOfRanges >= 2,
+                  let fullRange = Range(match.range(at: 0), in: result),
+                  let nameRange = Range(match.range(at: 1), in: result) else {
+                continue
+            }
+
+            let name = String(result[nameRange]).lowercased()
+            let replacement: String?
+            switch name {
+            case "nbsp", "ensp", "emsp", "thinsp", "hairsp", "numsp":
+                replacement = " "
+            case "shy", "zwnj", "zwj", "lrm", "rlm":
+                replacement = ""
+            case "amp":
+                replacement = "&"
+            case "lt":
+                replacement = "<"
+            case "gt":
+                replacement = ">"
+            case "quot":
+                replacement = "\""
+            case "apos":
+                replacement = "'"
+            default:
+                replacement = nil
+            }
+            guard let replacement else { continue }
+            result.replaceSubrange(fullRange, with: replacement)
+        }
+        return result
     }
 }

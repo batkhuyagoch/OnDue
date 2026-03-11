@@ -53,6 +53,8 @@ struct ObligationListItem: Identifiable, Hashable {
     let dueBucket: ObligationDueBucket
     let primaryThreadId: String?
     let lastActionAt: Date?
+    let senderEmail: String?
+    let senderDomain: String?
 
     var id: String { obligation.id }
 }

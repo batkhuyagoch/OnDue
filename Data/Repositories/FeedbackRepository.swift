@@ -173,25 +173,39 @@ final class HypothesisMetricsRepository: HypothesisMetricsRepositorying, @unchec
         counter: String
     ) async throws {
         guard !hypothesisIds.isEmpty else { return }
+        let groupedCounts = Dictionary(grouping: hypothesisIds, by: { $0 })
+            .mapValues(\.count)
+        guard !groupedCounts.isEmpty else { return }
         try await database.writeAsync { db in
-            for hypothesisId in hypothesisIds {
-                let existing = try HypothesisMetricCounterRecord
-                    .filter(Column("mailboxAccountId") == mailboxAccountId)
-                    .filter(Column("profile") == profile.rawValue)
-                    .filter(Column("hypothesisId") == hypothesisId)
-                    .filter(Column("counter") == counter)
-                    .fetchOne(db)
+            let now = Date()
+            let sortedEntries = groupedCounts.sorted { $0.key < $1.key }
+            let valuePlaceholders = Array(repeating: "(?, ?, ?, ?, ?, ?, ?)", count: sortedEntries.count)
+                .joined(separator: ", ")
+            var arguments: [DatabaseValueConvertible] = []
+            arguments.reserveCapacity(sortedEntries.count * 7)
 
-                var record = existing ?? HypothesisMetricCounterRecord(
-                    mailboxAccountId: mailboxAccountId,
-                    profile: profile.rawValue,
-                    hypothesisId: hypothesisId,
-                    counter: counter
-                )
-                record.count += 1
-                record.updatedAt = Date()
-                try record.save(db)
+            for (hypothesisId, delta) in sortedEntries {
+                arguments.append(UUID().uuidString)
+                arguments.append(mailboxAccountId)
+                arguments.append(profile.rawValue)
+                arguments.append(hypothesisId)
+                arguments.append(counter)
+                arguments.append(delta)
+                arguments.append(now)
             }
+
+            try db.execute(
+                sql: """
+                    INSERT INTO \(HypothesisMetricCounterRecord.databaseTableName)
+                    (id, mailboxAccountId, profile, hypothesisId, counter, count, updatedAt)
+                    VALUES \(valuePlaceholders)
+                    ON CONFLICT(mailboxAccountId, profile, hypothesisId, counter)
+                    DO UPDATE SET
+                        count = count + excluded.count,
+                        updatedAt = excluded.updatedAt
+                """,
+                arguments: StatementArguments(arguments)
+            )
         }
     }
 }

@@ -40,7 +40,14 @@ enum BackgroundSyncManager {
                 return
             }
 
-            guard let account = try? await environment.mailboxAccountRepository.fetchFirst(provider: .gmail) else {
+            let hydratedAccount: MailboxAccountRecord?
+            if let email = environment.gmailAuthService.userEmail, !email.isEmpty {
+                hydratedAccount = try? await environment.mailboxAccountRepository.getOrCreate(email: email, provider: .gmail)
+            } else {
+                hydratedAccount = try? await environment.mailboxAccountRepository.fetchFirst(provider: .gmail)
+            }
+
+            guard let account = hydratedAccount else {
                 task.setTaskCompleted(success: false)
                 AppLog.debug("BackgroundSync.noAccount")
                 return

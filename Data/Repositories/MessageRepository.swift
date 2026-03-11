@@ -14,6 +14,7 @@ protocol MessageRepositorying: Sendable {
     ) async throws -> [MessageRecord]
     func fetchByPk(_ pk: Int64) async throws -> MessageRecord?
     func fetchByProviderMessageId(_ providerMessageId: String) async throws -> MessageRecord?
+    func fetchByProviderMessageIds(mailboxAccountId: String, providerMessageIds: Set<String>) async throws -> [MessageRecord]
     func fetchProviderMessageIdsWithBodyText(mailboxAccountId: String, providerMessageIds: [String]) async throws -> Set<String>
     /// Returns provider message IDs that already exist with body text (fully hydrated). Used to skip summary/body fetches.
     func fetchProviderMessageIdsWithBody(mailboxAccountId: String, providerMessageIds: Set<String>) async throws -> Set<String>
@@ -77,8 +78,11 @@ final class MessageRepository: MessageRepositorying, @unchecked Sendable {
                     start = end
                 }
                 
+                var updateCount = 0
+                var insertCount = 0
+                
                 if !existingByProviderId.isEmpty {
-                    print("📧 MessageRepository.save: \(mailboxAccountId) found \(existingByProviderId.count) existing messages; will update instead of insert")
+                    Logger.info("MessageRepository.save: \(mailboxAccountId) found \(existingByProviderId.count) existing messages; will update instead of insert")
                 }
                 
                 for var message in group {
@@ -100,8 +104,15 @@ final class MessageRepository: MessageRepositorying, @unchecked Sendable {
                         if message.hasCalendar == false {
                             message.hasCalendar = existing.hasCalendar
                         }
+                        updateCount += 1
+                    } else {
+                        insertCount += 1
                     }
                     try message.save(db)
+                }
+                
+                if updateCount > 0 || insertCount > 0 {
+                    Logger.info("MessageRepository.save: \(mailboxAccountId) updates=\(updateCount) inserts=\(insertCount)")
                 }
             }
         }
@@ -174,6 +185,44 @@ final class MessageRepository: MessageRepositorying, @unchecked Sendable {
                 .filter(Column("providerMessageId") == providerMessageId)
                 .order(Column("internalDate").desc)
                 .fetchOne(db)
+        }
+    }
+
+    func fetchByProviderMessageIds(
+        mailboxAccountId: String,
+        providerMessageIds: Set<String>
+    ) async throws -> [MessageRecord] {
+        guard !providerMessageIds.isEmpty else { return [] }
+        return try await database.readAsync { db in
+            let ids = Array(providerMessageIds)
+            let maxChunkSize = 400
+            var start = 0
+            var results: [MessageRecord] = []
+
+            while start < ids.count {
+                let end = min(start + maxChunkSize, ids.count)
+                let chunk = Array(ids[start..<end])
+                let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ",")
+                let sql = """
+                    SELECT *
+                    FROM message
+                    WHERE mailboxAccountId = ?
+                      AND providerMessageId IN (\(placeholders))
+                      AND isDeleted = 0
+                """
+                var arguments: [DatabaseValueConvertible] = [mailboxAccountId]
+                arguments.append(contentsOf: chunk)
+                let rows = try Row.fetchAll(db, sql: sql, arguments: StatementArguments(arguments))
+                results.append(contentsOf: rows.compactMap { try? MessageRecord(row: $0) })
+                start = end
+            }
+
+            return results.sorted { lhs, rhs in
+                if lhs.internalDate != rhs.internalDate {
+                    return lhs.internalDate > rhs.internalDate
+                }
+                return lhs.providerMessageId > rhs.providerMessageId
+            }
         }
     }
 

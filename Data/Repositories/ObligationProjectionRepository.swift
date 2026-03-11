@@ -3,11 +3,31 @@ import GRDB
 
 protocol ObligationProjectionRepositorying: Sendable {
     func fetchItems(lens: ObligationLens, query: String, limit: Int) async throws -> [ObligationListItem]
+    func fetchItems(mode: DigestMode, query: String, limit: Int) async throws -> [ObligationListItem]
+    func fetchItemsForGlobalSearch(query: String, limit: Int) async throws -> [ObligationListItem]
     func upsert(obligation: ObligationRecord, in db: GRDB.Database) throws
+    func upsert(obligation: ObligationRecord, in db: GRDB.Database, precomputedPrimaryThreadId: String?) throws
+}
+
+enum DigestMode: String, CaseIterable, Identifiable {
+    case now
+    case later
+    case done
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .now: "Now"
+        case .later: "Later"
+        case .done: "Done"
+        }
+    }
 }
 
 enum ObligationLens: String, CaseIterable, Identifiable {
     case active
+    case overdue
     case needsReview
     case snoozed
     case resolved
@@ -17,6 +37,7 @@ enum ObligationLens: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .active: "Active"
+        case .overdue: "Overdue"
         case .needsReview: "Needs Review"
         case .snoozed: "Snoozed"
         case .resolved: "Resolved"
@@ -51,60 +72,37 @@ final class ObligationProjectionRepository: ObligationProjectionRepositorying, @
     func fetchItems(lens: ObligationLens, query: String, limit: Int) async throws -> [ObligationListItem] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let states = lensStates(for: lens)
-        return try await database.readAsync { db in
-            var sql = """
-                SELECT o.*, p.state AS projectionState, p.dueBucket AS projectionDueBucket,
-                       p.primaryThreadId AS projectionThreadId, p.lastActionAt AS projectionLastActionAt
-                FROM obligation_projection p
-                JOIN obligation o ON o.id = p.obligationId
-                JOIN message m ON m.pk = o.messagePk
-            """
-            var arguments: [DatabaseValueConvertible] = []
+        return try await fetchItems(
+            query: trimmed,
+            limit: limit,
+            whereClause: Self.stateInClause(states)
+        )
+    }
 
-            if !trimmed.isEmpty {
-                sql += " JOIN message_fts f ON f.rowid = m.pk"
-            }
+    func fetchItems(mode: DigestMode, query: String, limit: Int) async throws -> [ObligationListItem] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return try await fetchItems(
+            query: trimmed,
+            limit: limit,
+            whereClause: modeWhereClause(for: mode)
+        )
+    }
 
-            let placeholders = states.map { _ in "?" }.joined(separator: ",")
-            sql += """
-                WHERE p.state IN (\(placeholders))
-                  AND m.isDeleted = 0
-            """
-            arguments.append(contentsOf: states.map(\.rawValue))
-
-            if !trimmed.isEmpty {
-                sql += " AND message_fts MATCH ?"
-                arguments.append(Self.makeFtsQuery(from: trimmed))
-            }
-
-            sql += " LIMIT ?"
-            arguments.append(limit)
-
-            let rows = try Row.fetchAll(db, sql: sql, arguments: StatementArguments(arguments))
-            return rows.compactMap { row in
-                guard let record = try? ObligationRecord(row: row),
-                      let stateRaw: String = row["projectionState"],
-                      let state = ObligationLifecycleState(rawValue: stateRaw),
-                      let dueBucketRaw: String = row["projectionDueBucket"],
-                      let dueBucket = ObligationDueBucket(rawValue: dueBucketRaw) else {
-                    return nil
-                }
-
-                let primaryThreadId: String? = row["projectionThreadId"]
-                let lastActionAt: Date? = row["projectionLastActionAt"]
-                return ObligationListItem(
-                    obligation: ObligationItem(record: record),
-                    state: state,
-                    dueBucket: dueBucket,
-                    primaryThreadId: primaryThreadId,
-                    lastActionAt: lastActionAt
-                )
-            }
-        }
+    func fetchItemsForGlobalSearch(query: String, limit: Int) async throws -> [ObligationListItem] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return try await fetchItems(
+            query: trimmed,
+            limit: limit,
+            whereClause: Self.stateInClause([.active, .overdue, .needsReview, .snoozed, .resolved])
+        )
     }
 
     func upsert(obligation: ObligationRecord, in db: GRDB.Database) throws {
         let primaryThreadId = try fetchPrimaryThreadId(messagePk: obligation.messagePk, db: db)
+        try upsert(obligation: obligation, in: db, precomputedPrimaryThreadId: primaryThreadId)
+    }
+
+    func upsert(obligation: ObligationRecord, in db: GRDB.Database, precomputedPrimaryThreadId: String?) throws {
         let state = resolveState(for: obligation)
         let dueBucket = resolveDueBucket(for: obligation)
 
@@ -114,7 +112,7 @@ final class ObligationProjectionRepository: ObligationProjectionRepositorying, @
             confidence: obligation.confidence,
             dueDate: obligation.deadlineAt,
             dueBucket: dueBucket,
-            primaryThreadId: primaryThreadId,
+            primaryThreadId: precomputedPrimaryThreadId,
             lastActionAt: obligation.updatedAt,
             reasonCode: obligation.reasonCode,
             policyVersion: obligation.policyVersion,
@@ -158,7 +156,11 @@ final class ObligationProjectionRepository: ObligationProjectionRepositorying, @
     private func lensStates(for lens: ObligationLens) -> [ObligationLifecycleState] {
         switch lens {
         case .active:
-            return [.active, .overdue]
+            // Active now only shows non-overdue active items
+            return [.active]
+        case .overdue:
+            // Dedicated overdue lens
+            return [.overdue]
         case .needsReview:
             return [.needsReview]
         case .snoozed:
@@ -167,6 +169,83 @@ final class ObligationProjectionRepository: ObligationProjectionRepositorying, @
             // Only completed obligations appear in Resolved.
             // Suppressed (not-an-obligation) items stay out of this lens.
             return [.resolved]
+        }
+    }
+
+    private func modeWhereClause(for mode: DigestMode) -> String {
+        switch mode {
+        case .now:
+            return """
+            (
+                p.state IN ('overdue', 'needsReview')
+                OR (p.state = 'active' AND p.dueBucket IN ('today', 'next3Days', 'overdue'))
+            )
+            """
+        case .later:
+            return """
+            (
+                p.state = 'snoozed'
+                OR (p.state = 'active' AND p.dueBucket IN ('next7Days', 'later', 'noDueDate'))
+            )
+            """
+        case .done:
+            return "p.state = 'resolved'"
+        }
+    }
+
+    private func fetchItems(query: String, limit: Int, whereClause: String) async throws -> [ObligationListItem] {
+        try await database.readAsync { db in
+            var sql = """
+                SELECT o.*, p.state AS projectionState, p.dueBucket AS projectionDueBucket,
+                       p.primaryThreadId AS projectionThreadId, p.lastActionAt AS projectionLastActionAt,
+                       m.fromEmail AS messageFromEmail, m.fromDomain AS messageFromDomain
+                FROM obligation_projection p
+                JOIN obligation o ON o.id = p.obligationId
+                JOIN message m ON m.pk = o.messagePk
+            """
+            var arguments: [DatabaseValueConvertible] = []
+
+            if !query.isEmpty {
+                sql += " JOIN message_fts f ON f.rowid = m.pk"
+            }
+
+            sql += """
+                WHERE \(whereClause)
+                  AND m.isDeleted = 0
+            """
+
+            if !query.isEmpty {
+                sql += " AND message_fts MATCH ?"
+                arguments.append(Self.makeFtsQuery(from: query))
+            }
+
+            sql += " LIMIT ?"
+            arguments.append(limit)
+
+            let rows = try Row.fetchAll(db, sql: sql, arguments: StatementArguments(arguments))
+            return rows.compactMap { row in
+                guard let record = try? ObligationRecord(row: row),
+                      let stateRaw: String = row["projectionState"],
+                      let state = ObligationLifecycleState(rawValue: stateRaw),
+                      let dueBucketRaw: String = row["projectionDueBucket"],
+                      let dueBucket = ObligationDueBucket(rawValue: dueBucketRaw) else {
+                    return nil
+                }
+
+                let primaryThreadId: String? = row["projectionThreadId"]
+                let lastActionAt: Date? = row["projectionLastActionAt"]
+                let senderEmail: String? = row["messageFromEmail"]
+                let senderDomain: String? = row["messageFromDomain"]
+                return ObligationListItem(
+                    obligation: ObligationItem(record: record),
+                    state: state,
+                    dueBucket: dueBucket,
+                    primaryThreadId: primaryThreadId,
+                    lastActionAt: lastActionAt,
+                    senderEmail: senderEmail,
+                    senderDomain: senderDomain
+                )
+            }
         }
     }
 
@@ -184,6 +263,11 @@ final class ObligationProjectionRepository: ObligationProjectionRepositorying, @
 }
 
 private extension ObligationProjectionRepository {
+    static func stateInClause(_ states: [ObligationLifecycleState]) -> String {
+        let values = states.map { "'\($0.rawValue)'" }.joined(separator: ", ")
+        return "p.state IN (\(values))"
+    }
+
     static func makeFtsQuery(from input: String) -> String {
         let rawTokens = input
             .lowercased()

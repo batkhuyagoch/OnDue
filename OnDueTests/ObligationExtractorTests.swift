@@ -294,6 +294,22 @@ final class ObligationExtractorTests: XCTestCase {
         XCTAssertEqual(obligations.count, 2)
     }
 
+    func testScanYear_FallsBackWhenSnippetIsBlankOrNoisy() async throws {
+        let message = actionableMessage(
+            pk: 41,
+            providerMessageId: "yearscan-snippet-fallback",
+            threadId: "yearscan-thread",
+            internalDate: Date(timeIntervalSince1970: 1_700_200_000),
+            subject: "Past due payment notice",
+            snippet: "&#8199;&#8205;&#847;",
+            bodyText: "Your payment is past due. Please pay by March 30 to avoid interruption."
+        )
+
+        let items = try await extractor.scanYear(messages: [message], mailboxAccountId: "acct")
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items.first?.snippet, "Past due payment notice")
+    }
+
     // MARK: - Helpers
 
     private func assertActionable(_ messages: [MessageRecord], mailboxAccountId: String) async throws {

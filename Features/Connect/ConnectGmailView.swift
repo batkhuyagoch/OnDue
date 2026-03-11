@@ -352,6 +352,34 @@ struct SyncPolicyView: View {
         )
     }
 
+    private var coverageScanMonthsBinding: Binding<Int> {
+        Binding(
+            get: { policy.coverageScanMonths },
+            set: { policy.coverageScanMonths = SyncPolicyStore.clampCoverageMonths($0) }
+        )
+    }
+
+    private var coverageScanIntensityBinding: Binding<CoverageScanIntensity> {
+        Binding(
+            get: { policy.coverageScanIntensity },
+            set: { policy.coverageScanIntensity = $0 }
+        )
+    }
+
+    private var coverageRequireChargingBinding: Binding<Bool> {
+        Binding(
+            get: { policy.coverageBackgroundRequiresCharging },
+            set: { policy.coverageBackgroundRequiresCharging = $0 }
+        )
+    }
+
+    private var coveragePreferWiFiBinding: Binding<Bool> {
+        Binding(
+            get: { policy.coveragePreferWiFi },
+            set: { policy.coveragePreferWiFi = $0 }
+        )
+    }
+
     var body: some View {
         NavigationView {
             Form {
@@ -378,11 +406,45 @@ struct SyncPolicyView: View {
 
                 Section {
                     Toggle("Allow long scans & background continuation", isOn: longScanOptInBinding)
-                    Text("Enables 12‑month backfill and coverage check to run or continue in the background. Requires more battery and data.")
+                    Text("Allows extended coverage scans to continue in the background. Requires more battery and data.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } header: {
                     Text("Long Scan & Background")
+                }
+
+                Section(header: Text("Coverage Scan")) {
+                    Picker("Range", selection: coverageScanMonthsBinding) {
+                        Text("1 month").tag(1)
+                        Text("3 months").tag(3)
+                        Text("6 months").tag(6)
+                        Text("12 months").tag(12)
+                        Text("24 months").tag(24)
+                    }
+                    Text("Selected range: \(policy.coverageScanMonths) months")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Stepper(
+                        value: coverageScanMonthsBinding,
+                        in: SyncPolicyStore.minimumCoverageMonths...SyncPolicyStore.maximumCoverageMonths,
+                        step: 1
+                    ) {
+                        Text("Custom range: \(policy.coverageScanMonths) months")
+                    }
+
+                    Picker("Scan intensity", selection: coverageScanIntensityBinding) {
+                        ForEach(CoverageScanIntensity.allCases) { intensity in
+                            Text(intensity.title).tag(intensity)
+                        }
+                    }
+                    .pickerStyle(.menu)
+
+                    Toggle("Background scans require charging", isOn: coverageRequireChargingBinding)
+                    Toggle("Prefer Wi-Fi for long scans", isOn: coveragePreferWiFiBinding)
+                    Text("Wi-Fi preference is best-effort for now and may continue on cellular if iOS schedules the task.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 Section(header: Text("Limits")) {

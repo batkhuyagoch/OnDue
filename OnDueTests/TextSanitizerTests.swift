@@ -46,4 +46,41 @@ final class TextSanitizerTests: XCTestCase {
         XCTAssertFalse(output.lowercased().contains("utm_"))
         XCTAssertFalse(output.lowercased().contains("gclid"))
     }
+
+    func testSanitizeDetailMessageRemovesSplitNumericEntityNoise() {
+        let noisy = """
+        Thanks for your payment! 96 You've paid your Boost bill
+        &#8199;&#8199;&#8199;&#8199; &#8199;&
+        #8199;&#8199;&#8199;&#8199;&#8199;
+        &#8199;&#8205;&#847; &#8199;&#847;
+        """
+
+        let detail = TextSanitizer.sanitizeDetailMessage(
+            bodyText: noisy,
+            bodyHtml: nil,
+            snippet: nil
+        )
+
+        XCTAssertNotNil(detail)
+        XCTAssertTrue(detail?.full.contains("Thanks for your payment") ?? false)
+        XCTAssertFalse(detail?.full.contains("&#") ?? true)
+        XCTAssertFalse(detail?.full.contains("\u{2007}") ?? true)
+        XCTAssertFalse(detail?.full.contains("\u{200D}") ?? true)
+        XCTAssertFalse(detail?.full.contains("\u{034F}") ?? true)
+    }
+
+    func testSanitizeDetailMessageDecodesNamedEntities() {
+        let noisy = "&shy; &shy; &nbsp; Payment was processed &amp; confirmed."
+        let detail = TextSanitizer.sanitizeDetailMessage(
+            bodyText: noisy,
+            bodyHtml: nil,
+            snippet: nil
+        )
+
+        XCTAssertNotNil(detail)
+        XCTAssertFalse(detail?.full.contains("&shy;") ?? true)
+        XCTAssertFalse(detail?.full.contains("&nbsp;") ?? true)
+        XCTAssertFalse(detail?.full.contains("&amp;") ?? true)
+        XCTAssertTrue(detail?.full.contains("Payment was processed & confirmed.") ?? false)
+    }
 }
