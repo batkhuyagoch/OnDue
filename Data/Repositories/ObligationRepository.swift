@@ -381,7 +381,17 @@ private extension ObligationRepository {
                 guard let pk: Int64 = row["pk"] else { continue }
                 let threadId: String? = row["threadId"]
                 let providerMessageId: String? = row["providerMessageId"]
-                if let resolved = threadId ?? providerMessageId {
+                let normalizedThreadId = threadId?.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let normalizedThreadId, !normalizedThreadId.isEmpty {
+                    result[pk] = normalizedThreadId
+                    continue
+                }
+                let normalizedProviderMessageId = providerMessageId?.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let normalizedProviderMessageId, !normalizedProviderMessageId.isEmpty {
+                    result[pk] = normalizedProviderMessageId
+                    continue
+                }
+                if let resolved = providerMessageId {
                     result[pk] = resolved
                 }
             }

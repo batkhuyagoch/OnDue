@@ -168,6 +168,7 @@ enum YearScanBackgroundManager {
                         }
                     }
                 )
+                await environment.yearScanRepository.markRunFinalized(runToken: runToken)
                 let excluded = (try? await environment.messageStateManager.getExcludedMessageIDsCached(maxAge: 0)) ?? []
                 try await environment.yearScanRepository.saveRun(
                     items: runResult.items,

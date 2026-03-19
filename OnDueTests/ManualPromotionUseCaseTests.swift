@@ -144,6 +144,14 @@ private final class MessageRepositoryStub: MessageRepositorying, @unchecked Send
         beforePk: Int64?,
         limit: Int
     ) async throws -> [MessageRecord] { [] }
+    func fetchInDateRangePage(
+        mailboxAccountId: String,
+        startDate: Date,
+        endDate: Date,
+        beforeDate: Date?,
+        beforePk: Int64?,
+        limit: Int
+    ) async throws -> [MessageRecord] { [] }
     func fetchByPk(_ pk: Int64) async throws -> MessageRecord? { nil }
     func fetchByProviderMessageId(_ providerMessageId: String) async throws -> MessageRecord? { message }
     func fetchByProviderMessageIds(mailboxAccountId: String, providerMessageIds: Set<String>) async throws -> [MessageRecord] {

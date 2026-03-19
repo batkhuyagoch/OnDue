@@ -143,11 +143,13 @@ final class ObligationProjectionRepository: ObligationProjectionRepositorying, @
 
     private func resolveDueBucket(for obligation: ObligationRecord) -> ObligationDueBucket {
         guard let deadline = obligation.deadlineAt else { return .noDueDate }
+        let calendar = Calendar.current
         let now = Date()
-        let startOfToday = Calendar.current.startOfDay(for: now)
+        let startOfToday = calendar.startOfDay(for: now)
+        let startOfDeadline = calendar.startOfDay(for: deadline)
         if deadline < startOfToday { return .overdue }
-        if Calendar.current.isDateInToday(deadline) { return .today }
-        let daysUntil = Calendar.current.dateComponents([.day], from: now, to: deadline).day ?? 0
+        if calendar.isDateInToday(deadline) { return .today }
+        let daysUntil = calendar.dateComponents([.day], from: startOfToday, to: startOfDeadline).day ?? 0
         if daysUntil <= 3 { return .next3Days }
         if daysUntil <= 7 { return .next7Days }
         return .later
@@ -258,7 +260,15 @@ final class ObligationProjectionRepository: ObligationProjectionRepositorying, @
         guard let row else { return nil }
         let threadId: String? = row["threadId"]
         let providerMessageId: String? = row["providerMessageId"]
-        return threadId ?? providerMessageId
+        let normalizedThreadId = threadId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let normalizedThreadId, !normalizedThreadId.isEmpty {
+            return normalizedThreadId
+        }
+        let normalizedProviderId = providerMessageId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let normalizedProviderId, !normalizedProviderId.isEmpty {
+            return normalizedProviderId
+        }
+        return nil
     }
 }
 

@@ -125,3 +125,97 @@ enum AppLog {
         return "\(message) | \(suffix)"
     }
 }
+
+enum AppErrorClassifier {
+    /// Cancellation and user-abort errors should not surface as user-facing failures.
+    static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return true
+        }
+
+        let nsError = error as NSError
+        if nsError.domain == "Swift.CancellationError" {
+            return true
+        }
+        if nsError.domain == NSCocoaErrorDomain && nsError.code == NSUserCancelledError {
+            return true
+        }
+        if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
+            return true
+        }
+        return false
+    }
+
+    static func shouldSuppressUserFacing(_ error: Error) -> Bool {
+        isCancellation(error)
+    }
+
+    static func classLabel(for error: Error) -> String {
+        if isCancellation(error) {
+            return "cancelled"
+        }
+
+        if let authError = error as? GmailAuthError {
+            switch authError {
+            case .cancelled:
+                return "cancelled"
+            case .notSignedIn, .missingAccessToken:
+                return "auth"
+            case .signInFailed:
+                return "auth_failed"
+            }
+        }
+
+        if case GmailClientError.notAuthenticated = error {
+            return "auth"
+        }
+
+        if case GmailClientError.apiError(let code, _) = error {
+            if code == 401 || code == 403 { return "auth" }
+            if code == 429 { return "quota" }
+            return "api_\(code)"
+        }
+
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain {
+            return "network"
+        }
+        return "unknown"
+    }
+}
+
+enum AppUserErrorMapper {
+    static func message(for error: Error, fallback: String) -> String {
+        if AppErrorClassifier.shouldSuppressUserFacing(error) {
+            return fallback
+        }
+
+        if let authError = error as? GmailAuthError {
+            switch authError {
+            case .cancelled:
+                return fallback
+            case .notSignedIn:
+                return "Not signed in to Google. Reconnect Gmail in Settings."
+            case .missingAccessToken:
+                return "Google access token missing. Reconnect Gmail in Settings."
+            case .signInFailed(let underlying):
+                return "Google sign-in failed: \(underlying.localizedDescription)"
+            }
+        }
+
+        if case GmailClientError.notAuthenticated = error {
+            return "Gmail authorization expired. Reconnect Gmail in Settings."
+        }
+
+        if case GmailClientError.apiError(let code, _) = error {
+            if code == 401 || code == 403 {
+                return "Gmail authorization expired. Reconnect Gmail in Settings."
+            }
+            if code == 429 {
+                return "Gmail API limit reached. Please try again in a few minutes."
+            }
+        }
+
+        return fallback
+    }
+}

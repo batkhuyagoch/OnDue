@@ -355,7 +355,12 @@ struct SyncPolicyView: View {
     private var coverageScanMonthsBinding: Binding<Int> {
         Binding(
             get: { policy.coverageScanMonths },
-            set: { policy.coverageScanMonths = SyncPolicyStore.clampCoverageMonths($0) }
+            set: {
+                policy.coverageScanMonths = SyncPolicyStore.clampCoverageMonths(
+                    $0,
+                    max: policy.effectiveMaximumCoverageMonths
+                )
+            }
         )
     }
 
@@ -377,6 +382,20 @@ struct SyncPolicyView: View {
         Binding(
             get: { policy.coveragePreferWiFi },
             set: { policy.coveragePreferWiFi = $0 }
+        )
+    }
+
+    private var coverage36MonthExperimentalBinding: Binding<Bool> {
+        Binding(
+            get: { policy.coverage36MonthExperimentalEnabled },
+            set: { policy.coverage36MonthExperimentalEnabled = $0 }
+        )
+    }
+
+    private var extendedScanKillSwitchBinding: Binding<Bool> {
+        Binding(
+            get: { policy.extendedScanKillSwitchEnabled },
+            set: { policy.extendedScanKillSwitchEnabled = $0 }
         )
     }
 
@@ -419,15 +438,23 @@ struct SyncPolicyView: View {
                         Text("3 months").tag(3)
                         Text("6 months").tag(6)
                         Text("12 months").tag(12)
-                        Text("24 months").tag(24)
+                        if policy.longScanAndBackgroundOptIn {
+                            Text("24 months").tag(24)
+                        }
+                        if policy.coverage36MonthExperimentalEnabled {
+                            Text("36 months (experimental)").tag(36)
+                        }
                     }
                     Text("Selected range: \(policy.coverageScanMonths) months")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("Current max range: \(policy.effectiveMaximumCoverageMonths) months")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
                     Stepper(
                         value: coverageScanMonthsBinding,
-                        in: SyncPolicyStore.minimumCoverageMonths...SyncPolicyStore.maximumCoverageMonths,
+                        in: SyncPolicyStore.minimumCoverageMonths...policy.effectiveMaximumCoverageMonths,
                         step: 1
                     ) {
                         Text("Custom range: \(policy.coverageScanMonths) months")
@@ -443,6 +470,14 @@ struct SyncPolicyView: View {
                     Toggle("Background scans require charging", isOn: coverageRequireChargingBinding)
                     Toggle("Prefer Wi-Fi for long scans", isOn: coveragePreferWiFiBinding)
                     Text("Wi-Fi preference is best-effort for now and may continue on cellular if iOS schedules the task.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section(header: Text("Extended Scan Flags")) {
+                    Toggle("Enable 36-month experimental range", isOn: coverage36MonthExperimentalBinding)
+                    Toggle("Emergency kill switch for extended ranges", isOn: extendedScanKillSwitchBinding)
+                    Text("24-month range requires Long Scan opt-in. 36-month range remains experimental and can be disabled instantly via kill switch.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

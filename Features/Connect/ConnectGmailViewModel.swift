@@ -148,8 +148,26 @@ final class ConnectGmailViewModel: ObservableObject {
         } catch GmailAuthError.cancelled {
             statusMessage = nil
         } catch {
+            if AppErrorClassifier.shouldSuppressUserFacing(error) {
+                AppLog.debug(
+                    "Connect.connect.suppressed",
+                    fields: [
+                        "errorClass": AppErrorClassifier.classLabel(for: error),
+                        "error": error.localizedDescription
+                    ]
+                )
+                statusMessage = nil
+                return
+            }
             isSyncing = false
-            statusMessage = "Error: \(error.localizedDescription)"
+            AppLog.error(
+                "Connect.connect.failed",
+                fields: [
+                    "errorClass": AppErrorClassifier.classLabel(for: error),
+                    "error": error.localizedDescription
+                ]
+            )
+            statusMessage = AppUserErrorMapper.message(for: error, fallback: "Unable to connect Gmail. Please try again.")
         }
     }
     
@@ -186,7 +204,26 @@ final class ConnectGmailViewModel: ObservableObject {
             statusMessage = "Local cache cleared (\(deleted) messages)"
             lastSyncReport = nil
         } catch {
-            statusMessage = "Reset failed: \(error.localizedDescription)"
+            if AppErrorClassifier.shouldSuppressUserFacing(error) {
+                AppLog.debug(
+                    "Connect.resetLocalData.suppressed",
+                    fields: [
+                        "errorClass": AppErrorClassifier.classLabel(for: error),
+                        "error": error.localizedDescription
+                    ]
+                )
+                statusMessage = nil
+                isResetting = false
+                return
+            }
+            AppLog.error(
+                "Connect.resetLocalData.failed",
+                fields: [
+                    "errorClass": AppErrorClassifier.classLabel(for: error),
+                    "error": error.localizedDescription
+                ]
+            )
+            statusMessage = AppUserErrorMapper.message(for: error, fallback: "Unable to clear local cache. Please try again.")
         }
         isResetting = false
     }
@@ -216,7 +253,26 @@ final class ConnectGmailViewModel: ObservableObject {
             UserDefaults.standard.removeObject(forKey: lastConnectedAtKey)
             clearPersistedBackfillResumable()
         } catch {
-            statusMessage = "Removal failed: \(error.localizedDescription)"
+            if AppErrorClassifier.shouldSuppressUserFacing(error) {
+                AppLog.debug(
+                    "Connect.deleteAllData.suppressed",
+                    fields: [
+                        "errorClass": AppErrorClassifier.classLabel(for: error),
+                        "error": error.localizedDescription
+                    ]
+                )
+                statusMessage = nil
+                isResetting = false
+                return
+            }
+            AppLog.error(
+                "Connect.deleteAllData.failed",
+                fields: [
+                    "errorClass": AppErrorClassifier.classLabel(for: error),
+                    "error": error.localizedDescription
+                ]
+            )
+            statusMessage = AppUserErrorMapper.message(for: error, fallback: "Unable to remove account data. Please try again.")
         }
         isResetting = false
     }
@@ -301,7 +357,25 @@ final class ConnectGmailViewModel: ObservableObject {
             
         } catch {
             isSyncing = false
-            statusMessage = "Sync failed: \(error.localizedDescription)"
+            if AppErrorClassifier.shouldSuppressUserFacing(error) {
+                AppLog.debug(
+                    "Connect.sync.suppressed",
+                    fields: [
+                        "errorClass": AppErrorClassifier.classLabel(for: error),
+                        "error": error.localizedDescription
+                    ]
+                )
+                statusMessage = nil
+                return
+            }
+            AppLog.error(
+                "Connect.sync.failed",
+                fields: [
+                    "errorClass": AppErrorClassifier.classLabel(for: error),
+                    "error": error.localizedDescription
+                ]
+            )
+            statusMessage = AppUserErrorMapper.message(for: error, fallback: "Sync failed. Please try again.")
         }
     }
 
@@ -402,6 +476,17 @@ final class ConnectGmailViewModel: ObservableObject {
             )
 
         } catch {
+            if AppErrorClassifier.shouldSuppressUserFacing(error) {
+                AppLog.debug(
+                    "Connect.backfill.suppressed",
+                    fields: [
+                        "errorClass": AppErrorClassifier.classLabel(for: error),
+                        "error": error.localizedDescription
+                    ]
+                )
+                statusMessage = nil
+                return
+            }
             let isQuota = Self.isQuotaRelatedError(error)
             let state = BackfillResumableState(
                 lastCompletedMonth: lastCompletedMonth,
@@ -418,7 +503,14 @@ final class ConnectGmailViewModel: ObservableObject {
                     statusMessage = "API limit reached at month \(lastCompletedMonth + 1) of \(totalMonths). Tap Resume later to continue."
                 }
             } else {
-                statusMessage = "Backfill failed: \(error.localizedDescription)"
+                AppLog.error(
+                    "Connect.backfill.failed",
+                    fields: [
+                        "errorClass": AppErrorClassifier.classLabel(for: error),
+                        "error": error.localizedDescription
+                    ]
+                )
+                statusMessage = AppUserErrorMapper.message(for: error, fallback: "Backfill failed. Please try again.")
             }
         }
     }

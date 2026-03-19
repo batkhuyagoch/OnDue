@@ -388,20 +388,52 @@ final class GmailSyncCoordinator: GmailSyncCoordinating, @unchecked Sendable {
     }
 
     func resetLocalCache(mailboxAccountId: String) async throws -> Int {
-        let deleted = try await messageRepository.deleteAll(for: mailboxAccountId)
+        var deleted = try await messageRepository.deleteAll(for: mailboxAccountId)
+        var usedFallback = false
+
+        // If the supplied account id is stale, clear cache across all known accounts.
+        if deleted == 0 {
+            let allAccounts = try await mailboxAccountRepository.fetchAll()
+            for account in allAccounts where account.id != mailboxAccountId {
+                deleted += try await messageRepository.deleteAll(for: account.id)
+            }
+            usedFallback = !allAccounts.isEmpty
+        }
+
         AppLog.info(
             "SyncCoordinator.resetLocalCache",
-            fields: ["mailboxAccountId": mailboxAccountId, "deleted": deleted]
+            fields: [
+                "mailboxAccountId": mailboxAccountId,
+                "deleted": deleted,
+                "usedFallback": usedFallback
+            ]
         )
         return deleted
     }
 
     func deleteAllAccountData(mailboxAccountId: String) async throws {
         try await yearScanRepository.clearState()
-        try await mailboxAccountRepository.delete(id: mailboxAccountId)
+        if let _ = try await mailboxAccountRepository.fetch(byId: mailboxAccountId) {
+            try await mailboxAccountRepository.delete(id: mailboxAccountId)
+            AppLog.info(
+                "SyncCoordinator.deleteAllAccountData",
+                fields: ["mailboxAccountId": mailboxAccountId, "scope": "single"]
+            )
+            return
+        }
+
+        // Fallback for stale ids: remove every local mailbox account.
+        let allAccounts = try await mailboxAccountRepository.fetchAll()
+        for account in allAccounts {
+            try await mailboxAccountRepository.delete(id: account.id)
+        }
         AppLog.info(
             "SyncCoordinator.deleteAllAccountData",
-            fields: ["mailboxAccountId": mailboxAccountId]
+            fields: [
+                "mailboxAccountId": mailboxAccountId,
+                "scope": "all",
+                "deletedAccountCount": allAccounts.count
+            ]
         )
     }
 }

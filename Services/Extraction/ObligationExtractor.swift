@@ -9,6 +9,9 @@ protocol ObligationExtracting: Sendable {
 }
 
 final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
+    private static let compareLegacyPolicyFlagKey = "debug.yearScan.compareLegacyPolicy"
+    private static let compareLegacySamplePercentKey = "debug.yearScan.compareLegacySamplePercent"
+
     private let parser = EmailParser()
     private let ruleEngine: RuleEngine
     private let ruleWeightRepository: RuleWeightRepositorying
@@ -16,6 +19,8 @@ final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
     private let hypothesisMetricsRepository: HypothesisMetricsRepositorying
     private let candidateScoreRepository: CandidateScoreRepositorying
     private let suppressionRepository: SuppressionRepositorying?
+    private let compareLegacyPolicyDuringYearScan: Bool
+    private let compareLegacySamplePercent: Int
 
     init(
         preferences: FilterPreferencesStoring,
@@ -31,6 +36,9 @@ final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
         self.hypothesisMetricsRepository = hypothesisMetricsRepository
         self.candidateScoreRepository = candidateScoreRepository
         self.suppressionRepository = suppressionRepository
+        self.compareLegacyPolicyDuringYearScan = UserDefaults.standard.bool(forKey: Self.compareLegacyPolicyFlagKey)
+        let samplePercent = UserDefaults.standard.integer(forKey: Self.compareLegacySamplePercentKey)
+        self.compareLegacySamplePercent = min(max(samplePercent, 0), 100)
     }
 
     func extract(from messages: [MessageRecord], mailboxAccountId: String) async throws -> [ObligationRecord] {
@@ -58,7 +66,7 @@ final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
                 profile: .digest,
                 reviewCalibration: reviewCalibration
             )
-            let threadKey = message.threadId ?? message.providerMessageId
+            let threadKey = normalizedThreadKey(threadId: message.threadId, providerMessageId: message.providerMessageId)
 
             if ruleEngine.isAccepted(assessment) || ruleEngine.isBorderline(assessment) {
                 try? await hypothesisMetricsRepository.increment(
@@ -157,18 +165,20 @@ final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
         for message in messages {
             guard let pk = message.pk else { continue }
             let parsedEmail = parser.parse(message: message)
-            let legacy = ruleEngine.evaluateYearScanLegacy(email: parsedEmail)
             let migrated = ruleEngine.evaluateYearScan(email: parsedEmail)
-            if (legacy != nil) != (migrated != nil) {
-                AppLog.info(
-                    "YearScan.migrationDisagreement",
-                    fields: [
-                        "mailboxAccountId": mailboxAccountId,
-                        "subject": message.subject,
-                        "legacyAccepted": legacy != nil,
-                        "migratedAccepted": migrated != nil
-                    ]
-                )
+            if shouldCompareLegacyDecision(for: message.providerMessageId) {
+                let legacy = ruleEngine.evaluateYearScanLegacy(email: parsedEmail)
+                if (legacy != nil) != (migrated != nil) {
+                    AppLog.info(
+                        "YearScan.migrationDisagreement",
+                        fields: [
+                            "mailboxAccountId": mailboxAccountId,
+                            "subject": message.subject,
+                            "legacyAccepted": legacy != nil,
+                            "migratedAccepted": migrated != nil
+                        ]
+                    )
+                }
             }
             guard let assessment = migrated else { continue }
 
@@ -188,7 +198,7 @@ final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
                 hypothesisIds: assessment.matchedRuleIds,
                 counter: "accepted"
             )
-            let threadKey = message.threadId ?? message.providerMessageId
+            let threadKey = normalizedThreadKey(threadId: message.threadId, providerMessageId: message.providerMessageId)
 
             let displaySnippet = bestDisplaySnippet(
                 snippet: parsedEmail.snippet,
@@ -309,5 +319,29 @@ final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
         let domain = (senderDomain ?? "unknown").lowercased()
         let rulesKey = matchedRuleIds.map { $0.lowercased() }.sorted().joined(separator: "|")
         return "\(mailboxAccountId)|\(domain)|\(rulesKey)"
+    }
+
+    private func normalizedThreadKey(threadId: String?, providerMessageId: String) -> String {
+        let normalizedThreadId = threadId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let normalizedThreadId, !normalizedThreadId.isEmpty {
+            return normalizedThreadId
+        }
+        return providerMessageId
+    }
+
+    private func shouldCompareLegacyDecision(for providerMessageId: String) -> Bool {
+        if compareLegacyPolicyDuringYearScan {
+            return true
+        }
+        guard compareLegacySamplePercent > 0 else {
+            return false
+        }
+        return Self.stableBucket(for: providerMessageId) < compareLegacySamplePercent
+    }
+
+    private static func stableBucket(for value: String) -> Int {
+        value.unicodeScalars.reduce(into: 0) { partial, scalar in
+            partial = (partial &* 31 &+ Int(scalar.value)) % 100
+        }
     }
 }

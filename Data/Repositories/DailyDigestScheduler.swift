@@ -87,10 +87,10 @@ enum DigestError: LocalizedError {
 // MARK: - Settings View Integration
 
 struct DigestSettingsView: View {
-    @StateObject private var scheduler = DailyDigestScheduler.shared
+    @StateObject private var viewModel = DigestSettingsViewModel()
     @State private var digestTime = DateComponents(hour: 9, minute: 0)
     @State private var isEnabled = false
-    @State private var showError: Error?
+    @State private var showError: String?
     
     var body: some View {
         Form {
@@ -99,9 +99,13 @@ struct DigestSettingsView: View {
                     .onChange(of: isEnabled) { _, newValue in
                         Task {
                             if newValue {
-                                await enableDigest()
+                                await viewModel.enableDigest(
+                                    digestTime: digestTime,
+                                    onDisable: { isEnabled = false },
+                                    onError: { showError = $0 }
+                                )
                             } else {
-                                disableDigest()
+                                viewModel.disableDigest()
                             }
                         }
                     }
@@ -117,7 +121,10 @@ struct DigestSettingsView: View {
                             set: { newDate in
                                 digestTime = Calendar.current.dateComponents([.hour, .minute], from: newDate)
                                 Task {
-                                    try? await scheduler.scheduleDailyDigest(at: digestTime)
+                                    let ok = await viewModel.scheduleDigest(at: digestTime)
+                                    if !ok {
+                                        showError = "Failed to schedule digest notification."
+                                    }
                                 }
                             }
                         ),
@@ -131,42 +138,48 @@ struct DigestSettingsView: View {
             }
         }
         .navigationTitle("Digest Settings")
-        .alert(error: $showError)
+        .alert(
+            "Error",
+            isPresented: Binding(
+                get: { showError != nil },
+                set: { if !$0 { showError = nil } }
+            )
+        ) {
+            Button("OK") { showError = nil }
+        } message: {
+            Text(showError ?? "Something went wrong")
+        }
     }
-    
-    private func enableDigest() async {
+}
+
+@MainActor
+final class DigestSettingsViewModel: ObservableObject {
+    private let scheduler = DailyDigestScheduler.shared
+
+    func enableDigest(
+        digestTime: DateComponents,
+        onDisable: @escaping @MainActor () -> Void,
+        onError: @escaping @MainActor (String) -> Void
+    ) async {
         do {
             try await scheduler.requestAuthorization()
             try await scheduler.scheduleDailyDigest(at: digestTime)
         } catch {
-            isEnabled = false
-            showError = error
+            await onDisable()
+            await onError(error.localizedDescription)
         }
     }
-    
-    private func disableDigest() {
+
+    func scheduleDigest(at digestTime: DateComponents) async -> Bool {
+        do {
+            try await scheduler.scheduleDailyDigest(at: digestTime)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    func disableDigest() {
         UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ["daily-digest"])
-    }
-}
-
-// MARK: - Alert Helper
-
-extension View {
-    func alert(error: Binding<Error?>) -> some View {
-        alert(
-            "Error",
-            isPresented: Binding(
-                get: { error.wrappedValue != nil },
-                set: { if !$0 { error.wrappedValue = nil } }
-            )
-        ) {
-            Button("OK") {
-                error.wrappedValue = nil
-            }
-        } message: {
-            if let error = error.wrappedValue {
-                Text(error.localizedDescription)
-            }
-        }
     }
 }

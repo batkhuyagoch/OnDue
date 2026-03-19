@@ -34,6 +34,23 @@ class AuthenticationState: ObservableObject {
             try await GmailAuthService.shared.authorize()
             await checkSignInStatus()
         } catch {
+            if AppErrorClassifier.shouldSuppressUserFacing(error) {
+                AppLog.debug(
+                    "Auth.signIn.suppressed",
+                    fields: [
+                        "errorClass": AppErrorClassifier.classLabel(for: error),
+                        "error": error.localizedDescription
+                    ]
+                )
+                return
+            }
+            AppLog.error(
+                "Auth.signIn.failed",
+                fields: [
+                    "errorClass": AppErrorClassifier.classLabel(for: error),
+                    "error": error.localizedDescription
+                ]
+            )
             print("Sign in error: \(error)")
         }
     }

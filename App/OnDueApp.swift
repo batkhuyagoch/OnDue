@@ -17,7 +17,7 @@ struct OnDueApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView_Clean()
+            RootView()
                 .environmentObject(environmentStore)
                 .onOpenURL { url in
                     // Handle Google Sign-In callback

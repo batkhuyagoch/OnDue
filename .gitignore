@@ -35,5 +35,6 @@ GoogleService-Info.plist
 *.local
 .env
 dev.info.plist
+.cursor/
 
 .tmp/

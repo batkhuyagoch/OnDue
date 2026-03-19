@@ -42,6 +42,7 @@ protocol YearScanRepositorying: Sendable {
     func fetchLatest() async throws -> YearScanSnapshot?
     func fetchLatestState() async throws -> YearScanStateSnapshot?
     func fetchResumeState() async throws -> YearScanResumeState?
+    func markRunFinalized(runToken: String) async
     func clearResumeState() async throws
     func clearState() async throws
 }
@@ -109,6 +110,13 @@ final class YearScanRepository: YearScanRepositorying, @unchecked Sendable {
         guard shouldApply else { return }
 
         try await database.writeAsync { db in
+            if let existing = try YearScanStateRecord.fetchOne(db, key: self.stateId),
+               existing.isInProgress == false,
+               existing.resumeStateJSON == nil,
+               existing.lastChecked != nil {
+                // A finalized run is authoritative; ignore delayed partial updates.
+                return
+            }
             let filteredItems = items.filter { !excludedProviderMessageIds.contains($0.providerMessageId) }
             for item in filteredItems {
                 var record = YearScanResultRecord(item: item)
@@ -196,7 +204,7 @@ final class YearScanRepository: YearScanRepositorying, @unchecked Sendable {
         coverageSummary: String,
         statusMessage: String?,
         resumeState: YearScanResumeState? = nil,
-        scanRangeMonths: Int = SyncPolicyStore.defaultCoverageMonths,
+        scanRangeMonths: Int = 12,
         scanIntensity: String = CoverageScanIntensity.balanced.rawValue
     ) async throws {
         try await database.writeAsync { db in
@@ -223,7 +231,7 @@ final class YearScanRepository: YearScanRepositorying, @unchecked Sendable {
         coverageSummary: String,
         statusMessage: String?,
         resumeState: YearScanResumeState?,
-        scanRangeMonths: Int = SyncPolicyStore.defaultCoverageMonths,
+        scanRangeMonths: Int = 12,
         scanIntensity: String = CoverageScanIntensity.balanced.rawValue
     ) async throws {
         try await database.writeAsync { db in
@@ -252,6 +260,10 @@ final class YearScanRepository: YearScanRepositorying, @unchecked Sendable {
             }
             return Self.decodeResumeState(from: state.resumeStateJSON)
         }
+    }
+
+    func markRunFinalized(runToken: String) async {
+        await partialWriteGuard.markFinalized(runToken: runToken)
     }
 
     func clearResumeState() async throws {
@@ -339,8 +351,12 @@ final class YearScanRepository: YearScanRepositorying, @unchecked Sendable {
 private actor YearScanPartialWriteGuard {
     private var activeRunToken: String?
     private var latestSequence: Int = 0
+    private var finalizedRunTokens: [String] = []
 
     func shouldApply(runToken: String, sequence: Int) -> Bool {
+        if finalizedRunTokens.contains(runToken) {
+            return false
+        }
         if sequence == 1 || activeRunToken == nil {
             activeRunToken = runToken
             latestSequence = 0
@@ -349,5 +365,13 @@ private actor YearScanPartialWriteGuard {
         guard sequence > latestSequence else { return false }
         latestSequence = sequence
         return true
+    }
+
+    func markFinalized(runToken: String) {
+        if finalizedRunTokens.contains(runToken) { return }
+        finalizedRunTokens.append(runToken)
+        if finalizedRunTokens.count > 16 {
+            finalizedRunTokens.removeFirst(finalizedRunTokens.count - 16)
+        }
     }
 }

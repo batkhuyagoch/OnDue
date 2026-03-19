@@ -4,6 +4,17 @@ struct YearScanRunResult {
     let items: [YearScanItem]
     let scannedMessageCount: Int
     let resumeState: YearScanResumeState?
+    let telemetry: YearScanRunTelemetry
+}
+
+struct YearScanRunTelemetry {
+    let stopReason: String
+    let elapsedSeconds: Double
+    let peakMemoryMB: UInt64
+    let pagesScanned: Int
+    let effectiveBatchSize: Int
+    let minBatchSize: Int
+    let maxBatchSize: Int
 }
 
 struct YearScanPartialUpdate {
@@ -189,8 +200,12 @@ enum YearScanRunner {
         let intensity: CoverageScanIntensity
 
         static func from(policy: SyncPolicyStore) -> RunConfiguration {
-            RunConfiguration(
-                rangeMonths: SyncPolicyStore.clampCoverageMonths(policy.coverageScanMonths),
+            let clampedMonths = SyncPolicyStore.clampCoverageMonths(
+                policy.coverageScanMonths,
+                max: policy.effectiveMaximumCoverageMonths
+            )
+            return RunConfiguration(
+                rangeMonths: clampedMonths,
                 intensity: policy.coverageScanIntensity
             )
         }
@@ -440,7 +455,9 @@ enum YearScanRunner {
                 return $0.id < $1.id
             }
             .prefix(workingSetHardCap)
-        return Dictionary(uniqueKeysWithValues: kept.map { (($0.threadId ?? $0.providerMessageId), $0) })
+        return Dictionary(
+            uniqueKeysWithValues: kept.map { (normalizedThreadKey(threadId: $0.threadId, providerMessageId: $0.providerMessageId), $0) }
+        )
     }
     
     private static func memoryMB(_ bytes: UInt64) -> UInt64 {
@@ -457,6 +474,14 @@ enum YearScanRunner {
         }
     }
 
+    private static func normalizedThreadKey(threadId: String?, providerMessageId: String) -> String {
+        let normalizedThreadId = threadId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let normalizedThreadId, !normalizedThreadId.isEmpty {
+            return normalizedThreadId
+        }
+        return providerMessageId
+    }
+
     static func run(
         environment: AppEnvironment,
         resumeState: YearScanResumeState? = nil,
@@ -465,11 +490,20 @@ enum YearScanRunner {
         checkpointUpdate: ((YearScanResumeState) -> Void)? = nil,
         partialUpdate: ((YearScanPartialUpdate) -> Void)? = nil
     ) async throws -> YearScanRunResult {
+        let runStartedAt = Date()
+        var peakMemoryBytes = captureRuntimeSnapshot().memoryUsedBytes
+        var pagesScanned = 0
+        var totalBatchSize = 0
+        var minBatchSize = Int.max
+        var maxBatchSize = 0
         let accounts = try await environment.mailboxAccountRepository.fetchAll()
         var collected: [YearScanItem] = []
         var scannedMessageCount = resumeState?.scannedMessageCount ?? 0
         let activeConfig = configuration ?? RunConfiguration.from(policy: environment.syncPolicyStore)
-        let clampedRangeMonths = SyncPolicyStore.clampCoverageMonths(activeConfig.rangeMonths)
+        let clampedRangeMonths = SyncPolicyStore.clampCoverageMonths(
+            activeConfig.rangeMonths,
+            max: environment.syncPolicyStore.effectiveMaximumCoverageMonths
+        )
         let endDate = Date()
         let startDate = Calendar.current.date(byAdding: .month, value: -clampedRangeMonths, to: endDate) ?? endDate
         let monthRanges = buildMonthRanges(startDate: startDate, endDate: endDate)
@@ -491,6 +525,8 @@ enum YearScanRunner {
             let account = accounts[accountIndex]
             Logger.info("YearScan: backfill start account=\(account.emailAddress)")
             var backfillSavedTotal = 0
+            let excludedIDs = try await environment.messageStateManager.getExcludedMessageIDs()
+            Logger.info("YearScan: account=\(account.emailAddress) excluding \(excludedIDs.count) locally-actioned messages")
             let monthStart = accountIndex == accountStart ? min(max(normalizedResumeState?.monthIndex ?? 0, 0), totalMonths) : 0
             for index in monthStart..<totalMonths {
                 let range = monthRanges[index]
@@ -499,14 +535,15 @@ enum YearScanRunner {
                 let activeMonthLabel = monthLabel(for: range.start)
                 let status = "Backfilling: \(activeMonthLabel) (\(monthIndex)/\(totalMonths))"
                 statusUpdate?(status)
+                let existingSummary = monthSummaries.first(where: { $0.monthLabel == activeMonthLabel })
                 monthSummaries = upsertMonthSummary(
                     in: monthSummaries,
                     label: activeMonthLabel,
                     monthIndex: index,
-                    messagesScanned: 0,
-                    promotedCount: 0,
-                    expectedCount: 0,
-                    droppedCount: 0,
+                    messagesScanned: existingSummary?.messagesScanned ?? 0,
+                    promotedCount: existingSummary?.promotedCount ?? 0,
+                    expectedCount: existingSummary?.expectedCount ?? 0,
+                    droppedCount: existingSummary?.droppedCount ?? 0,
                     isInProgress: true,
                     completedAt: nil
                 )
@@ -561,19 +598,55 @@ enum YearScanRunner {
                     throw error
                 }
                 backfillSavedTotal += backfillReport.messagesSavedCount
+                let monthClassification: (promoted: Int, expected: Int, dropped: Int)
+                do {
+                    statusUpdate?("Classifying: \(activeMonthLabel)...")
+                    monthClassification = try await classifyMonthSlice(
+                        environment: environment,
+                        mailboxAccountId: account.id,
+                        startDate: range.start,
+                        endDate: range.end,
+                        excludedProviderMessageIds: excludedIDs
+                    )
+                } catch {
+                    Logger.info(
+                        "YearScan: classify slice failed month=\(monthIndex)/\(totalMonths) error=\(error.localizedDescription)"
+                    )
+                    monthClassification = (0, 0, 0)
+                }
+                let completedSummary = monthSummaries.first(where: { $0.monthLabel == activeMonthLabel })
                 monthSummaries = upsertMonthSummary(
                     in: monthSummaries,
                     label: activeMonthLabel,
                     monthIndex: index,
-                    messagesScanned: backfillReport.messagesSavedCount,
-                    promotedCount: 0,
-                    expectedCount: 0,
-                    droppedCount: 0,
+                    messagesScanned: (completedSummary?.messagesScanned ?? 0) + backfillReport.messagesSavedCount,
+                    promotedCount: monthClassification.promoted,
+                    expectedCount: monthClassification.expected,
+                    droppedCount: monthClassification.dropped,
                     isInProgress: false,
                     completedAt: Date()
                 )
+                currentResumeState = YearScanResumeState(
+                    accountIndex: accountIndex,
+                    monthIndex: min(index + 1, totalMonths),
+                    totalMonths: totalMonths,
+                    phase: .backfill,
+                    beforeDate: nil,
+                    beforePk: nil,
+                    scannedMessageCount: scannedMessageCount,
+                    lastStatusMessage: "Backfill completed: \(activeMonthLabel)",
+                    consecutiveQuotaHits: 0,
+                    configuredRangeMonths: clampedRangeMonths,
+                    configuredIntensity: activeConfig.intensity.rawValue,
+                    currentMonthLabel: activeMonthLabel,
+                    currentPage: nil,
+                    monthSummaries: monthSummaries
+                )
+                if let state = currentResumeState {
+                    checkpointUpdate?(state)
+                }
                 Logger.info(
-                    "YearScan: backfill slice account=\(account.emailAddress) month=\(monthIndex)/\(totalMonths) saved=\(backfillReport.messagesSavedCount)"
+                    "YearScan: backfill slice account=\(account.emailAddress) month=\(monthIndex)/\(totalMonths) saved=\(backfillReport.messagesSavedCount) promoted=\(monthClassification.promoted) expected=\(monthClassification.expected) dropped=\(monthClassification.dropped)"
                 )
             }
             Logger.info(
@@ -591,13 +664,10 @@ enum YearScanRunner {
             var lastPartialUpdateAt = Date.distantPast
             var lastPartialUpdatePage = 0
             
-            // Load excluded message IDs once for performance
-            let excludedIDs = try await environment.messageStateManager.getExcludedMessageIDs()
-            Logger.info("YearScan: account=\(account.emailAddress) excluding \(excludedIDs.count) locally-actioned messages")
-
             while true {
                 try Task.checkCancellation()
                 let snapshot = captureRuntimeSnapshot()
+                peakMemoryBytes = max(peakMemoryBytes, snapshot.memoryUsedBytes)
                 let now = Date()
                 let decision = makeThrottleDecision(
                     snapshot: snapshot,
@@ -632,6 +702,9 @@ enum YearScanRunner {
                 statusUpdate?(status)
                 
                 let currentPageSize = max(50, decision.batchSize)
+                totalBatchSize += currentPageSize
+                minBatchSize = min(minBatchSize, currentPageSize)
+                maxBatchSize = max(maxBatchSize, currentPageSize)
                 
                 let messages = try await environment.messageRepository.fetchRecentPage(
                     mailboxAccountId: account.id,
@@ -654,6 +727,7 @@ enum YearScanRunner {
                 }
 
                 page += 1
+                pagesScanned += 1
                 scannedMessageCount += messages.count  // Track total fetched for cursor management
                 let scanningStatusBase = "Scanning inbox... \(scannedMessageCount) messages"
                 let scanningStatus: String
@@ -677,13 +751,14 @@ enum YearScanRunner {
                         mailboxAccountId: account.id
                     )
                     let memoryAfterExtraction = captureRuntimeSnapshot().memoryUsedBytes
+                    peakMemoryBytes = max(peakMemoryBytes, memoryAfterExtraction)
                     Logger.info(
                         "YearScan: page=\(page) memoryMB extraction_before=\(memoryMB(memoryBeforeExtraction)) extraction_after=\(memoryMB(memoryAfterExtraction))"
                     )
 
                     autoreleasepool {
                         for item in scanned {
-                            let key = item.threadId ?? item.providerMessageId
+                            let key = normalizedThreadKey(threadId: item.threadId, providerMessageId: item.providerMessageId)
                             if let existing = bestByThread[key] {
                                 if item.isHigherPriority(than: existing) {
                                     bestByThread[key] = item
@@ -777,8 +852,36 @@ enum YearScanRunner {
         }
 
         let sorted = sortItems(collected)
+        let elapsedSeconds = Date().timeIntervalSince(runStartedAt)
+        let effectiveBatchSize = pagesScanned > 0 ? (totalBatchSize / pagesScanned) : 0
+        let telemetry = YearScanRunTelemetry(
+            stopReason: "completed",
+            elapsedSeconds: elapsedSeconds,
+            peakMemoryMB: memoryMB(peakMemoryBytes),
+            pagesScanned: pagesScanned,
+            effectiveBatchSize: effectiveBatchSize,
+            minBatchSize: pagesScanned > 0 ? minBatchSize : 0,
+            maxBatchSize: maxBatchSize
+        )
+        AppLog.info(
+            "YearScan.run.completed",
+            fields: [
+                "stopReason": telemetry.stopReason,
+                "elapsedSeconds": String(format: "%.2f", telemetry.elapsedSeconds),
+                "peakMemoryMB": telemetry.peakMemoryMB,
+                "pagesScanned": telemetry.pagesScanned,
+                "effectiveBatchSize": telemetry.effectiveBatchSize,
+                "minBatchSize": telemetry.minBatchSize,
+                "maxBatchSize": telemetry.maxBatchSize
+            ]
+        )
         Logger.info("YearScan: done scanned=\(scannedMessageCount) results=\(sorted.count)")
-        return YearScanRunResult(items: sorted, scannedMessageCount: scannedMessageCount, resumeState: currentResumeState)
+        return YearScanRunResult(
+            items: sorted,
+            scannedMessageCount: scannedMessageCount,
+            resumeState: currentResumeState,
+            telemetry: telemetry
+        )
     }
 
     private static func sortItems(_ items: [YearScanItem]) -> [YearScanItem] {
@@ -893,6 +996,70 @@ enum YearScanRunner {
             )
         }
         return merged
+    }
+
+    private static func classifyMonthSlice(
+        environment: AppEnvironment,
+        mailboxAccountId: String,
+        startDate: Date,
+        endDate: Date,
+        excludedProviderMessageIds: Set<String>
+    ) async throws -> (promoted: Int, expected: Int, dropped: Int) {
+        var beforeDate: Date?
+        var beforePk: Int64?
+        var bestByThread: [String: YearScanItem] = [:]
+
+        while true {
+            try Task.checkCancellation()
+            let messages = try await environment.messageRepository.fetchInDateRangePage(
+                mailboxAccountId: mailboxAccountId,
+                startDate: startDate,
+                endDate: endDate,
+                beforeDate: beforeDate,
+                beforePk: beforePk,
+                limit: pageSize
+            )
+
+            guard !messages.isEmpty else { break }
+            let filtered = messages.filter { !excludedProviderMessageIds.contains($0.providerMessageId) }
+            if !filtered.isEmpty {
+                let scanned = try await environment.obligationExtractor.scanYear(
+                    messages: filtered,
+                    mailboxAccountId: mailboxAccountId
+                )
+                for item in scanned {
+                    let key = normalizedThreadKey(threadId: item.threadId, providerMessageId: item.providerMessageId)
+                    if let existing = bestByThread[key] {
+                        if item.isHigherPriority(than: existing) {
+                            bestByThread[key] = item
+                        }
+                    } else {
+                        bestByThread[key] = item
+                    }
+                }
+            }
+
+            guard let last = messages.last, let lastPk = last.pk else { break }
+            beforeDate = last.internalDate
+            beforePk = lastPk
+
+            if messages.count < pageSize { break }
+        }
+
+        var promoted = 0
+        var expected = 0
+        var dropped = 0
+        for item in bestByThread.values {
+            switch item.promotionDecision {
+            case .promoted:
+                promoted += 1
+            case .expectedEvent:
+                expected += 1
+            case .dropped:
+                dropped += 1
+            }
+        }
+        return (promoted, expected, dropped)
     }
 
     private static func isQuotaRelatedError(_ error: Error) -> Bool {

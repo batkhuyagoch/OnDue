@@ -12,6 +12,14 @@ protocol MessageRepositorying: Sendable {
         beforePk: Int64?,
         limit: Int
     ) async throws -> [MessageRecord]
+    func fetchInDateRangePage(
+        mailboxAccountId: String,
+        startDate: Date,
+        endDate: Date,
+        beforeDate: Date?,
+        beforePk: Int64?,
+        limit: Int
+    ) async throws -> [MessageRecord]
     func fetchByPk(_ pk: Int64) async throws -> MessageRecord?
     func fetchByProviderMessageId(_ providerMessageId: String) async throws -> MessageRecord?
     func fetchByProviderMessageIds(mailboxAccountId: String, providerMessageIds: Set<String>) async throws -> [MessageRecord]
@@ -158,6 +166,34 @@ final class MessageRepository: MessageRepositorying, @unchecked Sendable {
             var request = MessageRecord
                 .filter(Column("mailboxAccountId") == mailboxAccountId)
                 .filter(Column("internalDate") >= cutoffDate)
+                .filter(Column("isDeleted") == false)
+                .order(Column("internalDate").desc, Column("pk").desc)
+                .limit(limit)
+
+            if let beforeDate, let beforePk {
+                request = request.filter(
+                    sql: "internalDate < ? OR (internalDate = ? AND pk < ?)",
+                    arguments: [beforeDate, beforeDate, beforePk]
+                )
+            }
+
+            return try request.fetchAll(db)
+        }
+    }
+
+    func fetchInDateRangePage(
+        mailboxAccountId: String,
+        startDate: Date,
+        endDate: Date,
+        beforeDate: Date?,
+        beforePk: Int64?,
+        limit: Int
+    ) async throws -> [MessageRecord] {
+        try await database.readAsync { db in
+            var request = MessageRecord
+                .filter(Column("mailboxAccountId") == mailboxAccountId)
+                .filter(Column("internalDate") >= startDate)
+                .filter(Column("internalDate") < endDate)
                 .filter(Column("isDeleted") == false)
                 .order(Column("internalDate").desc, Column("pk").desc)
                 .limit(limit)

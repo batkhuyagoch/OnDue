@@ -5,6 +5,7 @@ struct YearScanBanner: View {
     @ObservedObject var state: YearScanState
     @EnvironmentObject private var environmentStore: AppEnvironmentStore
     @State private var isDismissed = false
+    @State private var showScanHistory = false
 
     var body: some View {
         if !isDismissed {
@@ -29,6 +30,17 @@ struct YearScanBanner: View {
                     if state.isScanning {
                         ProgressView()
                             .controlSize(.small)
+                    } else if state.unseenItemsCount > 0 {
+                        Button {
+                            showScanHistory = true
+                        } label: {
+                            Text("Review")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 8)
+                                .background(Color.blue, in: Capsule())
+                        }
                     } else {
                         Button {
                             Task {
@@ -67,6 +79,12 @@ struct YearScanBanner: View {
             }
             .background(Color(.systemBackground))
             .shadow(radius: 2)
+            .sheet(isPresented: $showScanHistory) {
+                NavigationStack {
+                    YearScanHistoryView()
+                }
+                .environmentObject(environmentStore)
+            }
         }
     }
 }
@@ -87,6 +105,22 @@ class YearScanState: ObservableObject {
     @Published var totalMonths: Int?
     @Published var monthSummaries: [YearScanMonthSummary] = []
     private var estimatedScanMessages: Int?
+    private var latestResumeState: YearScanResumeState?
+    private var scanTask: Task<Void, Never>?
+    private var pauseRequested = false
+    private var cancelRequested = false
+
+    var canPause: Bool {
+        isScanning && scanTask != nil
+    }
+
+    var canResume: Bool {
+        !isScanning && latestResumeState != nil
+    }
+
+    var canCancel: Bool {
+        isScanning || latestResumeState != nil
+    }
 
     var shouldShowBanner: Bool {
         if isScanning { return true }
@@ -168,11 +202,13 @@ class YearScanState: ObservableObject {
                     currentMonthIndex = resume.monthIndex
                     totalMonths = resume.totalMonths
                     monthSummaries = resume.monthSummaries ?? []
+                    latestResumeState = resume
                 } else {
                     currentPhase = nil
                     currentMonthIndex = nil
                     totalMonths = nil
                     monthSummaries = []
+                    latestResumeState = nil
                 }
 
                 if snapshot.isInProgress {
@@ -201,15 +237,92 @@ class YearScanState: ObservableObject {
     }
 
     func startScan(using environment: AppEnvironment) async {
-        isScanning = true
-        scanProgress = 0
-        scanStatusMessage = "Preparing scan..."
-        livePromotedPreview = []
-        liveDeltaCount = 0
+        guard scanTask == nil else { return }
+        pauseRequested = false
+        cancelRequested = false
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.runScan(using: environment, resumeState: nil)
+        }
+        scanTask = task
+        await task.value
+        scanTask = nil
+    }
+
+    func resumeScan(using environment: AppEnvironment) async {
+        guard scanTask == nil else { return }
+        guard let resume = latestResumeState else {
+            await startScan(using: environment)
+            return
+        }
+        pauseRequested = false
+        cancelRequested = false
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.runScan(using: environment, resumeState: resume)
+        }
+        scanTask = task
+        await task.value
+        scanTask = nil
+    }
+
+    func pauseScan(using environment: AppEnvironment) async {
+        guard canPause else { return }
+        pauseRequested = true
+        scanTask?.cancel()
+        scanTask = nil
+        let configuration = YearScanRunner.RunConfiguration.from(policy: environment.syncPolicyStore)
+        await finalizeAfterScanFailure(
+            environment: environment,
+            configuration: configuration,
+            statusMessage: "Scan paused. Resume whenever you're ready."
+        )
+    }
+
+    func cancelScan(using environment: AppEnvironment) async {
+        cancelRequested = true
+        pauseRequested = false
+        scanTask?.cancel()
+        scanTask = nil
+        isScanning = false
+        scanProgress = nil
         currentPhase = nil
         currentMonthIndex = nil
         totalMonths = nil
         monthSummaries = []
+        latestResumeState = nil
+        liveDeltaCount = 0
+        scanStatusMessage = "Scan canceled."
+        try? await environment.yearScanRepository.clearResumeState()
+    }
+
+    private func runScan(
+        using environment: AppEnvironment,
+        resumeState: YearScanResumeState?
+    ) async {
+        let runStartedAt = Date()
+        isScanning = true
+        if resumeState == nil {
+            scanProgress = 0
+            scanStatusMessage = "Preparing scan..."
+            livePromotedPreview = []
+            liveDeltaCount = 0
+            currentPhase = nil
+            currentMonthIndex = nil
+            totalMonths = nil
+            monthSummaries = []
+            latestResumeState = nil
+        } else {
+            scanStatusMessage = "Resuming scan..."
+            latestResumeState = resumeState
+            currentPhase = resumeState?.phase
+            currentMonthIndex = resumeState?.monthIndex
+            totalMonths = resumeState?.totalMonths
+            monthSummaries = resumeState?.monthSummaries ?? monthSummaries
+            if let resumeState {
+                updateProgress(from: resumeState)
+            }
+        }
         let runConfiguration = YearScanRunner.RunConfiguration.from(policy: environment.syncPolicyStore)
         let restoredSession = (try? await environment.gmailAuthService.restorePreviousSignIn()) ?? false
         guard restoredSession else {
@@ -226,12 +339,12 @@ class YearScanState: ObservableObject {
                 environment: environment,
                 scannedMessageCount: scannedMessageCount,
                 statusMessage: scanStatusMessage,
-                resumeState: nil,
+                resumeState: resumeState,
                 configuration: runConfiguration
             )
             let result = try await YearScanCoordinator.run(
                 environment: environment,
-                resumeState: nil,
+                resumeState: resumeState,
                 configuration: runConfiguration,
                 statusUpdate: { [weak self] status in
                     Task { @MainActor [weak self] in
@@ -245,12 +358,14 @@ class YearScanState: ObservableObject {
                 checkpointUpdate: { [weak self] checkpoint in
                     Task { @MainActor [weak self] in
                         guard let self else { return }
+                        guard self.shouldApplyIncomingResumeState(checkpoint) else { return }
                         self.scannedMessageCount = checkpoint.scannedMessageCount
                         self.updateProgress(from: checkpoint)
                         self.currentPhase = checkpoint.phase
                         self.currentMonthIndex = checkpoint.monthIndex
                         self.totalMonths = checkpoint.totalMonths
                         self.monthSummaries = checkpoint.monthSummaries ?? []
+                        self.latestResumeState = checkpoint
                         partialSequence += 1
                         let sequence = partialSequence
                         Task {
@@ -272,6 +387,7 @@ class YearScanState: ObservableObject {
                 partialUpdate: { [weak self] update in
                     Task { @MainActor [weak self] in
                         guard let self else { return }
+                        guard self.shouldApplyIncomingResumeState(update.resumeState) else { return }
                         let previousCount = self.foundItemsCount
                         self.scannedMessageCount = update.scannedMessageCount
                         self.scanStatusMessage = CoverageStatusPresenter.progressMessage(from: update.statusMessage)
@@ -280,6 +396,7 @@ class YearScanState: ObservableObject {
                         self.currentMonthIndex = update.resumeState.monthIndex
                         self.totalMonths = update.resumeState.totalMonths
                         self.monthSummaries = update.resumeState.monthSummaries ?? []
+                        self.latestResumeState = update.resumeState
                         let promotedCount = update.items.filter { $0.promotionDecision == .promoted }.count
                         self.foundItemsCount = promotedCount
                         self.unseenItemsCount = promotedCount
@@ -328,6 +445,8 @@ class YearScanState: ObservableObject {
             currentMonthIndex = nil
             totalMonths = nil
             monthSummaries = []
+            latestResumeState = nil
+            await environment.yearScanRepository.markRunFinalized(runToken: runToken)
             let excluded = (try? await environment.messageStateManager.getExcludedMessageIDsCached(maxAge: 0)) ?? []
             try? await environment.yearScanRepository.saveRun(
                 items: result.items,
@@ -342,15 +461,92 @@ class YearScanState: ObservableObject {
                 environment: environment,
                 items: result.items
             )
+            AppLog.info(
+                "YearScanBanner.startScan.completed",
+                fields: [
+                    "stopReason": result.telemetry.stopReason,
+                    "elapsedSeconds": String(format: "%.2f", result.telemetry.elapsedSeconds),
+                    "peakMemoryMB": result.telemetry.peakMemoryMB,
+                    "pagesScanned": result.telemetry.pagesScanned,
+                    "effectiveBatchSize": result.telemetry.effectiveBatchSize,
+                    "scanRangeMonths": runConfiguration.rangeMonths
+                ]
+            )
+        } catch let quota as YearScanQuotaStoppedError {
+            latestResumeState = quota.resumeState
+            currentPhase = quota.resumeState.phase
+            currentMonthIndex = quota.resumeState.monthIndex
+            totalMonths = quota.resumeState.totalMonths
+            monthSummaries = quota.resumeState.monthSummaries ?? []
+            await finalizeAfterScanFailure(
+                environment: environment,
+                configuration: runConfiguration,
+                statusMessage: "Scan paused due to Gmail API limits. Resume when ready."
+            )
+            AppLog.info(
+                "YearScanBanner.startScan.quotaStopped",
+                fields: [
+                    "monthIndex": quota.resumeState.monthIndex,
+                    "totalMonths": quota.resumeState.totalMonths,
+                    "scanRangeMonths": runConfiguration.rangeMonths
+                ]
+            )
         } catch {
-            isScanning = false
-            scanProgress = nil
-            liveDeltaCount = 0
-            if Self.isAuthenticationError(error) {
-                scanStatusMessage = "Gmail authorization expired. Reconnect Gmail in Settings."
-            } else {
-                scanStatusMessage = "Scan failed. Try again."
+            if Task.isCancelled {
+                if cancelRequested {
+                    cancelRequested = false
+                    pauseRequested = false
+                    return
+                }
+                if pauseRequested {
+                    pauseRequested = false
+                    return
+                }
             }
+            if AppErrorClassifier.shouldSuppressUserFacing(error) {
+                let stopReason = AppErrorClassifier.classLabel(for: error)
+                AppLog.debug(
+                    "YearScanBanner.startScan.suppressed",
+                    fields: [
+                        "errorClass": stopReason,
+                        "error": error.localizedDescription
+                    ]
+                )
+                await finalizeAfterScanFailure(
+                    environment: environment,
+                    configuration: runConfiguration,
+                    statusMessage: "Scan paused. Resume whenever you're ready."
+                )
+                AppLog.info(
+                    "YearScanBanner.startScan.stopped",
+                    fields: [
+                        "stopReason": stopReason,
+                        "elapsedSeconds": String(format: "%.2f", Date().timeIntervalSince(runStartedAt)),
+                        "scanRangeMonths": runConfiguration.rangeMonths
+                    ]
+                )
+                return
+            }
+            AppLog.error(
+                "YearScanBanner.startScan.failed",
+                fields: [
+                    "stopReason": AppErrorClassifier.classLabel(for: error),
+                    "elapsedSeconds": String(format: "%.2f", Date().timeIntervalSince(runStartedAt)),
+                    "errorClass": AppErrorClassifier.classLabel(for: error),
+                    "error": error.localizedDescription
+                ]
+            )
+            let message: String
+            if Self.isAuthenticationError(error) {
+                message = "Gmail authorization expired. Reconnect Gmail in Settings."
+            } else {
+                message = AppUserErrorMapper.message(for: error, fallback: "Scan failed. Try again.")
+            }
+            await finalizeAfterScanFailure(
+                environment: environment,
+                configuration: runConfiguration,
+                statusMessage: message
+            )
             print("Scan error: \(error)")
         }
     }
@@ -365,6 +561,24 @@ class YearScanState: ObservableObject {
         }
         let description = error.localizedDescription.lowercased()
         return description.contains("invalid credentials") || description.contains("unauthenticated")
+    }
+
+    private func finalizeAfterScanFailure(
+        environment: AppEnvironment,
+        configuration: YearScanRunner.RunConfiguration,
+        statusMessage: String
+    ) async {
+        isScanning = false
+        scanStatusMessage = statusMessage
+        scanProgress = nil
+        liveDeltaCount = 0
+        await YearScanCoordinator.persistPaused(
+            environment: environment,
+            scannedMessageCount: scannedMessageCount,
+            statusMessage: statusMessage,
+            resumeState: latestResumeState,
+            configuration: configuration
+        )
     }
 
     private func updateProgress(from state: YearScanResumeState) {
@@ -396,5 +610,45 @@ class YearScanState: ObservableObject {
             // Keep in-progress UI honest: only show 100% when run is actually complete.
             self.scanProgress = isScanning ? min(clamped, 0.99) : clamped
         }
+    }
+
+    private func shouldApplyIncomingResumeState(_ incoming: YearScanResumeState) -> Bool {
+        Self.shouldApplyResumeState(current: latestResumeState, incoming: incoming)
+    }
+
+    static func shouldApplyResumeState(
+        current: YearScanResumeState?,
+        incoming: YearScanResumeState
+    ) -> Bool {
+        guard let current else { return true }
+
+        // Never let older backfill updates overwrite active scanning state.
+        if current.phase == .scanning, incoming.phase == .backfill {
+            return false
+        }
+
+        if incoming.accountIndex < current.accountIndex {
+            return false
+        }
+
+        if incoming.accountIndex == current.accountIndex {
+            if incoming.phase == .backfill, current.phase == .backfill,
+               incoming.monthIndex < current.monthIndex {
+                return false
+            }
+
+            if incoming.phase == .scanning, current.phase == .scanning {
+                let incomingPage = incoming.currentPage ?? 0
+                let currentPage = current.currentPage ?? 0
+                if incomingPage < currentPage {
+                    return false
+                }
+                if incomingPage == currentPage, incoming.scannedMessageCount < current.scannedMessageCount {
+                    return false
+                }
+            }
+        }
+
+        return true
     }
 }

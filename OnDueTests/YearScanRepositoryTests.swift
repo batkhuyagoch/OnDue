@@ -398,5 +398,103 @@ final class YearScanRepositoryTests: XCTestCase {
         XCTAssertEqual(snapshot?.resumeState?.monthSummaries?.count, 2)
         XCTAssertEqual(snapshot?.resumeState?.monthSummaries?.first?.monthLabel, "Jan 2025")
     }
+
+    func testUpsertPartialIgnoredAfterRunFinalized() async throws {
+        let item = YearScanItem(
+            mailboxAccountId: "acct",
+            messagePk: 501,
+            providerMessageId: "msg-501",
+            threadId: "thread-501",
+            subject: "Action",
+            snippet: "Action needed",
+            score: 0.90,
+            matchedReasons: ["action required"],
+            source: .scan,
+            promotionDecision: .promoted,
+            promotionReasonCode: .promotedActionable,
+            confidence: 0.90,
+            dueDate: Date()
+        )
+
+        try await repository.markInProgress(
+            scannedMessageCount: 100,
+            coverageSummary: YearScanRunner.coverageSummary,
+            statusMessage: "Scanning",
+            resumeState: nil
+        )
+        await repository.markRunFinalized(runToken: "run-finalized")
+        try await repository.saveRun(
+            items: [],
+            scannedMessageCount: 100,
+            lastChecked: Date(),
+            coverageSummary: YearScanRunner.coverageSummary,
+            scanRangeMonths: 12,
+            scanIntensity: CoverageScanIntensity.balanced.rawValue
+        )
+
+        try await repository.upsertPartial(
+            items: [item],
+            scannedMessageCount: 120,
+            coverageSummary: YearScanRunner.coverageSummary,
+            statusMessage: "Scanning inbox... 120 messages",
+            resumeState: nil,
+            scanRangeMonths: 12,
+            scanIntensity: CoverageScanIntensity.balanced.rawValue,
+            excludedProviderMessageIds: [],
+            runToken: "run-finalized",
+            sequence: 1
+        )
+
+        let snapshot = try await repository.fetchLatest()
+        XCTAssertEqual(snapshot?.isInProgress, false)
+        XCTAssertEqual(snapshot?.items.count, 0)
+    }
+
+    func testPauseResumeCancelLifecyclePersistsExpectedState() async throws {
+        let resume = YearScanResumeState(
+            accountIndex: 0,
+            monthIndex: 4,
+            totalMonths: 12,
+            phase: .backfill,
+            beforeDate: nil,
+            beforePk: nil,
+            scannedMessageCount: 480,
+            lastStatusMessage: "Backfilling: May 2025 (5/12)",
+            consecutiveQuotaHits: 0,
+            currentMonthLabel: "May 2025",
+            currentPage: 2
+        )
+
+        // Pause-like state should persist resume metadata and remain in-progress.
+        try await repository.markPaused(
+            scannedMessageCount: 480,
+            coverageSummary: YearScanRunner.coverageSummary,
+            statusMessage: "Scan paused. Resume whenever you're ready.",
+            resumeState: resume
+        )
+        var snapshot = try await repository.fetchLatest()
+        XCTAssertEqual(snapshot?.isInProgress, true)
+        XCTAssertEqual(snapshot?.resumeState?.monthIndex, 4)
+        XCTAssertEqual(snapshot?.resumeState?.currentMonthLabel, "May 2025")
+        XCTAssertEqual(snapshot?.resumeState?.currentPage, 2)
+
+        // Resume-like state should keep progress active and clear paused marker.
+        try await repository.markInProgress(
+            scannedMessageCount: 600,
+            coverageSummary: YearScanRunner.coverageSummary,
+            statusMessage: "Resuming scan...",
+            resumeState: resume
+        )
+        snapshot = try await repository.fetchLatest()
+        XCTAssertEqual(snapshot?.isInProgress, true)
+        XCTAssertNil(snapshot?.lastPaused)
+        XCTAssertEqual(snapshot?.statusMessage, "Resuming scan...")
+
+        // Cancel-like behavior clears resumability and in-progress state.
+        try await repository.clearResumeState()
+        snapshot = try await repository.fetchLatest()
+        XCTAssertEqual(snapshot?.isInProgress, false)
+        XCTAssertNil(snapshot?.resumeState)
+    }
 }
 

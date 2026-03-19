@@ -104,6 +104,10 @@
 				Gmail/UserActionRecord.swift,
 				YearScan/DigestView_Redesigned.swift,
 				YearScan/RootView_Clean.swift,
+				YearScan/UI/History/YearScanHistoryView.swift,
+				YearScan/UI/RootView.swift,
+				YearScan/UI/Settings/SettingsScreens.swift,
+				YearScan/UI/Settings/SettingsSections.swift,
 				YearScan/YearScanBannerState.swift,
 				YearScan/YearScanRunner.swift,
 			);

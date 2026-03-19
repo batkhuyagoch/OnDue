@@ -382,6 +382,7 @@ final class YearScanViewModel: ObservableObject {
     }
 
     func runScan(using environment: AppEnvironment, resume: Bool) async {
+        let runStartedAt = Date()
         let runConfiguration = YearScanRunner.RunConfiguration.from(policy: environment.syncPolicyStore)
         let runToken = UUID().uuidString
         activeRunToken = runToken
@@ -441,6 +442,8 @@ final class YearScanViewModel: ObservableObject {
                 checkpointUpdate: { checkpoint in
                     Task { @MainActor in
                         guard self.activeRunToken == runToken else { return }
+                        guard self.shouldApplyIncomingResumeState(checkpoint) else { return }
+                        self.scannedMessageCount = checkpoint.scannedMessageCount
                         self.latestResumeState = checkpoint
                         self.monthSummaries = checkpoint.monthSummaries ?? []
                         self.updateProgress()
@@ -448,7 +451,7 @@ final class YearScanViewModel: ObservableObject {
                         let sequence = self.partialSequence
                         let scanRange = runConfiguration.rangeMonths
                         let scanIntensity = runConfiguration.intensity.rawValue
-                        let scannedCount = self.scannedMessageCount
+                        let scannedCount = checkpoint.scannedMessageCount
                         let status = self.statusMessage
                         Task {
                             try? await environment.yearScanRepository.upsertPartial(
@@ -469,6 +472,7 @@ final class YearScanViewModel: ObservableObject {
                 partialUpdate: { update in
                     Task { @MainActor in
                         guard self.activeRunToken == runToken else { return }
+                        guard self.shouldApplyIncomingResumeState(update.resumeState) else { return }
                         self.partialSequence += 1
                         let sequence = self.partialSequence
                         self.applyPartialUpdate(update)
@@ -529,6 +533,7 @@ final class YearScanViewModel: ObservableObject {
             partialSequence = 0
             updateUIState()
 
+            await environment.yearScanRepository.markRunFinalized(runToken: runToken)
             let excluded = (try? await environment.messageStateManager.getExcludedMessageIDsCached(maxAge: 0)) ?? []
             try await environment.yearScanRepository.saveRun(
                 items: runResult.items,
@@ -542,6 +547,24 @@ final class YearScanViewModel: ObservableObject {
             await YearScanCoordinator.bridgePromotedFindingsToObligations(
                 environment: environment,
                 items: runResult.items
+            )
+            evaluateExtendedRangeGatesIfNeeded(
+                rangeMonths: runConfiguration.rangeMonths,
+                telemetry: runResult.telemetry,
+                promotedCount: promotedItems.count,
+                expectedCount: expectedEventSignals.count,
+                droppedCount: droppedReasonCounts.values.reduce(0, +)
+            )
+            AppLog.info(
+                "YearScan.runScan.completed",
+                fields: [
+                    "stopReason": runResult.telemetry.stopReason,
+                    "elapsedSeconds": String(format: "%.2f", runResult.telemetry.elapsedSeconds),
+                    "peakMemoryMB": runResult.telemetry.peakMemoryMB,
+                    "pagesScanned": runResult.telemetry.pagesScanned,
+                    "effectiveBatchSize": runResult.telemetry.effectiveBatchSize,
+                    "scanRangeMonths": runConfiguration.rangeMonths
+                ]
             )
         } catch let quotaErr as YearScanQuotaStoppedError {
             self.error = quotaErr
@@ -567,23 +590,59 @@ final class YearScanViewModel: ObservableObject {
                 resumeState: latestResumeState,
                 configuration: runConfiguration
             )
-        } catch is CancellationError {
-            isInProgress = true
-            statusMessage = "Scan paused. Resume whenever you're ready."
-            monthSummaries = latestResumeState?.monthSummaries ?? []
-            updateProgress()
-            updateUIState()
-            activeRunToken = nil
-            await YearScanCoordinator.persistPaused(
-                environment: environment,
-                scannedMessageCount: scannedMessageCount,
-                statusMessage: statusMessage,
-                resumeState: latestResumeState,
-                configuration: runConfiguration
+            AppLog.info(
+                "YearScan.runScan.stopped",
+                fields: [
+                    "stopReason": "quota",
+                    "elapsedSeconds": String(format: "%.2f", Date().timeIntervalSince(runStartedAt)),
+                    "lastCompletedMonthIndex": quotaErr.lastCompletedMonthIndex,
+                    "totalMonths": quotaErr.totalMonths
+                ]
             )
         } catch {
+            if AppErrorClassifier.shouldSuppressUserFacing(error) {
+                let stopReason = AppErrorClassifier.classLabel(for: error)
+                AppLog.debug(
+                    "YearScan.runScan.suppressed",
+                    fields: [
+                        "errorClass": stopReason,
+                        "error": error.localizedDescription
+                    ]
+                )
+                isInProgress = true
+                statusMessage = "Scan paused. Resume whenever you're ready."
+                monthSummaries = latestResumeState?.monthSummaries ?? []
+                updateProgress()
+                updateUIState()
+                activeRunToken = nil
+                await YearScanCoordinator.persistPaused(
+                    environment: environment,
+                    scannedMessageCount: scannedMessageCount,
+                    statusMessage: statusMessage,
+                    resumeState: latestResumeState,
+                    configuration: runConfiguration
+                )
+                AppLog.info(
+                    "YearScan.runScan.stopped",
+                    fields: [
+                        "stopReason": stopReason,
+                        "elapsedSeconds": String(format: "%.2f", Date().timeIntervalSince(runStartedAt)),
+                        "scanRangeMonths": runConfiguration.rangeMonths
+                    ]
+                )
+                return
+            }
+            AppLog.error(
+                "YearScan.runScan.failed",
+                fields: [
+                    "stopReason": AppErrorClassifier.classLabel(for: error),
+                    "elapsedSeconds": String(format: "%.2f", Date().timeIntervalSince(runStartedAt)),
+                    "errorClass": AppErrorClassifier.classLabel(for: error),
+                    "error": error.localizedDescription
+                ]
+            )
             self.error = error
-            statusMessage = "Scan failed. Try again."
+            statusMessage = AppUserErrorMapper.message(for: error, fallback: "Scan failed. Try again.")
             isInProgress = false
             updateProgress()
             updateUIState()
@@ -595,6 +654,40 @@ final class YearScanViewModel: ObservableObject {
     func clearError() {
         error = nil
         updateUIState()
+    }
+
+    private func evaluateExtendedRangeGatesIfNeeded(
+        rangeMonths: Int,
+        telemetry: YearScanRunTelemetry,
+        promotedCount: Int,
+        expectedCount: Int,
+        droppedCount: Int
+    ) {
+        guard rangeMonths > SyncPolicyStore.defaultCoverageMonths else { return }
+
+        let runtimeThreshold = rangeMonths >= 36 ? 1_800.0 : 1_200.0
+        let memoryThresholdMB: UInt64 = rangeMonths >= 36 ? 1_600 : 1_200
+        let quotaSafeStop = telemetry.stopReason != "quota"
+        let runtimeWithinGuardrail = telemetry.elapsedSeconds <= runtimeThreshold
+        let memoryWithinGuardrail = telemetry.peakMemoryMB <= memoryThresholdMB
+        let hasMeaningfulSignals = (promotedCount + expectedCount + droppedCount) > 0
+        let passed = quotaSafeStop && runtimeWithinGuardrail && memoryWithinGuardrail && hasMeaningfulSignals
+
+        AppLog.info(
+            "YearScan.rollout.gateEvaluation",
+            fields: [
+                "rangeMonths": rangeMonths,
+                "passed": passed,
+                "stopReason": telemetry.stopReason,
+                "runtimeSeconds": String(format: "%.2f", telemetry.elapsedSeconds),
+                "runtimeThreshold": String(format: "%.0f", runtimeThreshold),
+                "peakMemoryMB": telemetry.peakMemoryMB,
+                "memoryThresholdMB": memoryThresholdMB,
+                "promotedCount": promotedCount,
+                "expectedCount": expectedCount,
+                "droppedCount": droppedCount
+            ]
+        )
     }
 
     func dismiss(_ item: YearScanItem) {
@@ -625,6 +718,7 @@ final class YearScanViewModel: ObservableObject {
     }
 
     private func applyPartialUpdate(_ update: YearScanPartialUpdate) {
+        guard shouldApplyIncomingResumeState(update.resumeState) else { return }
         latestResumeState = update.resumeState
         monthSummaries = update.resumeState.monthSummaries ?? []
         scannedMessageCount = update.scannedMessageCount
@@ -656,6 +750,45 @@ final class YearScanViewModel: ObservableObject {
             }
         updateProgress()
         updateUIState()
+    }
+
+    private func shouldApplyIncomingResumeState(_ incoming: YearScanResumeState) -> Bool {
+        Self.shouldApplyResumeState(current: latestResumeState, incoming: incoming)
+    }
+
+    static func shouldApplyResumeState(
+        current: YearScanResumeState?,
+        incoming: YearScanResumeState
+    ) -> Bool {
+        guard let current else { return true }
+
+        if current.phase == .scanning, incoming.phase == .backfill {
+            return false
+        }
+
+        if incoming.accountIndex < current.accountIndex {
+            return false
+        }
+
+        if incoming.accountIndex == current.accountIndex {
+            if incoming.phase == .backfill, current.phase == .backfill,
+               incoming.monthIndex < current.monthIndex {
+                return false
+            }
+
+            if incoming.phase == .scanning, current.phase == .scanning {
+                let incomingPage = incoming.currentPage ?? 0
+                let currentPage = current.currentPage ?? 0
+                if incomingPage < currentPage {
+                    return false
+                }
+                if incomingPage == currentPage, incoming.scannedMessageCount < current.scannedMessageCount {
+                    return false
+                }
+            }
+        }
+
+        return true
     }
     
     private func updateProgress() {

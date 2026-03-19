@@ -378,7 +378,7 @@ struct DecisionPolicy {
             ),
             HypothesisDefinition(
                 id: .paymentFailure,
-                requiresAny: ["autopay_failed", "past_due", "collections"],
+                requiresAny: ["autopay_failed", "past_due", "collections", "payment_keyword"],
                 requiresAll: [],
                 boosts: ["payment_keyword", "deadline_keyword"],
                 blocks: ["receipt_statement"],

@@ -9,8 +9,57 @@ struct DigestView_Redesigned: View {
     @StateObject private var viewModel = DigestViewModel()
     @Namespace private var animation
     @State private var isQuickSyncing = false
+    @State private var expandedSectionIds: Set<String> = []
 
     var body: some View {
+        rootContent
+            .refreshable {
+                await performQuickSync()
+            }
+            .background(Color(.systemGroupedBackground))
+            .task {
+                await viewModel.loadDigest(using: environment.value)
+            }
+            .onReceive(environment.value.filterPreferencesStore.objectWillChange) { _ in
+                reloadDigest()
+            }
+            .searchable(
+                text: $viewModel.searchQuery,
+                placement: .navigationBarDrawer(displayMode: .automatic),
+                prompt: searchPromptText
+            )
+            .onChange(of: viewModel.searchQuery) { _, newValue in
+                guard !isSearchBlocked else {
+                    if !newValue.isEmpty {
+                        viewModel.searchQuery = ""
+                    }
+                    return
+                }
+                viewModel.updateSearchQuery(newValue)
+            }
+            .onChange(of: viewModel.selectedMode) { _, _ in
+                reloadDigest()
+            }
+            .onChange(of: viewModel.selectedGrouping) { _, _ in
+                reloadDigest()
+            }
+            .alert("Couldn't load obligations", isPresented: errorAlertBinding) {
+                Button("Try again") {
+                    viewModel.clearError()
+                    reloadDigest()
+                }
+                Button("Dismiss", role: .cancel) { viewModel.clearError() }
+            } message: {
+                Text(viewModel.error?.localizedDescription ?? "Tap Try again to reload your obligations.")
+            }
+            .overlay(alignment: .bottom) {
+                toastOverlays
+            }
+            .animation(.easeInOut, value: viewModel.undoBanner?.id)
+            .animation(.easeInOut, value: viewModel.learningBanner)
+    }
+
+    private var rootContent: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
                 // Quick Stats Header
@@ -36,54 +85,25 @@ struct DigestView_Redesigned: View {
                 }
             }
         }
-        .refreshable {
-            await performQuickSync()
-        }
-        .background(Color(.systemGroupedBackground))
-        .task {
-            await viewModel.loadDigest(using: environment.value)
-        }
-        .onReceive(environment.value.filterPreferencesStore.objectWillChange) { _ in
-            Task { await viewModel.loadDigest(using: environment.value) }
-        }
-        .searchable(
-            text: $viewModel.searchQuery,
-            placement: .navigationBarDrawer(displayMode: .automatic),
-            prompt: isSearchBlocked ? "Search disabled while scan/sync is running" : "Search obligations"
-        )
-        .searchDisabled(isSearchBlocked)
-        .onChange(of: viewModel.searchQuery) { _, newValue in
-            guard !isSearchBlocked else {
-                if !newValue.isEmpty {
-                    viewModel.searchQuery = ""
-                }
-                return
-            }
-            viewModel.updateSearchQuery(newValue)
-        }
-        .onChange(of: viewModel.selectedMode) { _, _ in
-            Task { await viewModel.loadDigest(using: environment.value) }
-        }
-        .onChange(of: viewModel.selectedGrouping) { _, _ in
-            Task { await viewModel.loadDigest(using: environment.value) }
-        }
-        .alert("Couldn't load obligations", isPresented: Binding(
+    }
+
+    private var searchPromptText: String {
+        isSearchBlocked ? "Search disabled while scan/sync is running" : "Search obligations"
+    }
+
+    private var isSearchBlocked: Bool {
+        yearScanState.isScanning || isQuickSyncing || viewModel.isLoading
+    }
+
+    private var errorAlertBinding: Binding<Bool> {
+        Binding(
             get: { viewModel.error != nil },
             set: { if !$0 { viewModel.clearError() } }
-        )) {
-            Button("Try again") {
-                viewModel.clearError()
-                Task { await viewModel.loadDigest(using: environment.value) }
-            }
-            Button("Dismiss", role: .cancel) { viewModel.clearError() }
-        } message: {
-            Text(viewModel.error?.localizedDescription ?? "Tap Try again to reload your obligations.")
-        }
-        .overlay(alignment: .bottom) {
-            toastOverlays
-        }
-        .animation(.easeInOut, value: viewModel.undoBanner?.id)
-        .animation(.easeInOut, value: viewModel.learningBanner)
+        )
+    }
+
+    private func reloadDigest() {
+        Task { await viewModel.loadDigest(using: environment.value) }
     }
     
     // MARK: - Quick Sync
@@ -92,8 +112,21 @@ struct DigestView_Redesigned: View {
         isQuickSyncing = true
         defer { isQuickSyncing = false }
         do {
-            let accounts = try await environment.value.mailboxAccountRepository.fetchAll()
-            guard let account = accounts.first else { return }
+            let restored = (try? await environment.value.gmailAuthService.restorePreviousSignIn()) ?? false
+            guard restored || environment.value.gmailAuthService.isSignedIn else {
+                throw NSError(
+                    domain: "OnDue.QuickSync",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Google session expired. Reconnect Gmail in Settings."]
+                )
+            }
+            guard let account = try await resolveQuickSyncMailboxAccount() else {
+                throw NSError(
+                    domain: "OnDue.QuickSync",
+                    code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "No Gmail account found for quick sync."]
+                )
+            }
             
             _ = try await environment.value.gmailSyncCoordinator.sync(
                 mailboxAccountId: account.id,
@@ -104,14 +137,40 @@ struct DigestView_Redesigned: View {
             // Reload the digest after sync
             await viewModel.loadDigest(using: environment.value)
         } catch {
-            print("Quick sync failed: \(error)")
+            if AppErrorClassifier.shouldSuppressUserFacing(error) {
+                AppLog.debug(
+                    "Digest.quickSync.suppressed",
+                    fields: [
+                        "errorClass": AppErrorClassifier.classLabel(for: error),
+                        "error": error.localizedDescription
+                    ]
+                )
+                return
+            }
+            AppLog.error(
+                "Digest.quickSync.failed",
+                fields: [
+                    "errorClass": AppErrorClassifier.classLabel(for: error),
+                    "error": error.localizedDescription
+                ]
+            )
+            viewModel.presentError(error)
         }
     }
 
-    private var isSearchBlocked: Bool {
-        yearScanState.isScanning || isQuickSyncing || viewModel.isLoading
+    private func resolveQuickSyncMailboxAccount() async throws -> MailboxAccountRecord? {
+        if let email = environment.value.gmailAuthService.userEmail, !email.isEmpty {
+            return try await environment.value.mailboxAccountRepository.getOrCreate(
+                email: email,
+                provider: .gmail
+            )
+        }
+        if let account = try await environment.value.mailboxAccountRepository.fetchFirst(provider: .gmail) {
+            return account
+        }
+        return try await environment.value.mailboxAccountRepository.fetchAll().first
     }
-    
+
     // MARK: - Quick Stats Header
     
     private var quickStatsHeader: some View {
@@ -273,47 +332,85 @@ struct DigestView_Redesigned: View {
         LazyVStack(spacing: 12) {
             ForEach(viewModel.sections) { section in
                 if !section.items.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        // Section Header
-                        Text(section.title)
-                            .font(.headline)
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 4)
-                            .padding(.top, 8)
-                        
-                        // Cards
-                        ForEach(Array(section.items.enumerated()), id: \.element.id) { index, item in
-                            ModernObligationCard(
-                                obligation: item.obligation,
-                                state: item.state,
-                                senderEmail: item.senderEmail,
-                                senderDomain: item.senderDomain,
-                                onConfirm: { Task { await viewModel.confirm(item.obligation) } },
-                                onDone: { Task { await viewModel.markDone(item.obligation) } },
-                                onDismiss: { Task { await viewModel.dismiss(item.obligation) } },
-                                onSnooze: { Task { await viewModel.snooze(item.obligation) } },
-                                onBlockSender: { sender in
-                                    Task { await viewModel.blockSender(item.obligation, senderOverride: sender) }
-                                },
-                                onBlockDomain: { domain in
-                                    Task { await viewModel.blockDomain(item.obligation, domainOverride: domain) }
-                                },
-                                environment: environment.value
-                            )
-                            .onAppear {
-                                Task {
-                                    await viewModel.logExposure(
-                                        obligation: item.obligation,
-                                        state: item.state,
-                                        position: index
-                                    )
-                                }
-                            }
-                        }
-                    }
+                    sectionCards(section)
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private func sectionCards(_ section: ObligationListSection) -> some View {
+        if isOverdueSection(section) {
+            DisclosureGroup(isExpanded: bindingForSectionExpansion(section.id)) {
+                sectionItemCards(section)
+                    .padding(.top, 8)
+            } label: {
+                Text(section.title)
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 4)
+            .padding(.top, 8)
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(section.title)
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 4)
+                    .padding(.top, 8)
+                sectionItemCards(section)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func sectionItemCards(_ section: ObligationListSection) -> some View {
+        ForEach(Array(section.items.enumerated()), id: \.element.id) { index, item in
+            ModernObligationCard(
+                obligation: item.obligation,
+                state: item.state,
+                senderEmail: item.senderEmail,
+                senderDomain: item.senderDomain,
+                onConfirm: { Task { await viewModel.confirm(item.obligation) } },
+                onDone: { Task { await viewModel.markDone(item.obligation) } },
+                onDismiss: { Task { await viewModel.dismiss(item.obligation) } },
+                onSnooze: { Task { await viewModel.snooze(item.obligation) } },
+                onBlockSender: { sender in
+                    Task { await viewModel.blockSender(item.obligation, senderOverride: sender) }
+                },
+                onBlockDomain: { domain in
+                    Task { await viewModel.blockDomain(item.obligation, domainOverride: domain) }
+                },
+                environment: environment.value
+            )
+            .onAppear {
+                Task {
+                    await viewModel.logExposure(
+                        obligation: item.obligation,
+                        state: item.state,
+                        position: index
+                    )
+                }
+            }
+        }
+    }
+
+    private func isOverdueSection(_ section: ObligationListSection) -> Bool {
+        let loweredTitle = section.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return section.id == "now_overdue" || section.id == ObligationDueBucket.overdue.rawValue || loweredTitle == "overdue"
+    }
+
+    private func bindingForSectionExpansion(_ sectionID: String) -> Binding<Bool> {
+        Binding(
+            get: { expandedSectionIds.contains(sectionID) },
+            set: { isExpanded in
+                if isExpanded {
+                    expandedSectionIds.insert(sectionID)
+                } else {
+                    expandedSectionIds.remove(sectionID)
+                }
+            }
+        )
     }
     
     // MARK: - Empty State
@@ -723,13 +820,16 @@ private struct DeadlineChip: View {
     
     private var timeText: String {
         let calendar = Calendar.current
+        let now = Date()
+        let startOfToday = calendar.startOfDay(for: now)
+        let startOfDeadline = calendar.startOfDay(for: deadline)
         if calendar.isDateInToday(deadline) {
             return deadline.formatted(date: .omitted, time: .shortened)
-        } else if deadline < calendar.startOfDay(for: Date()) {
-            let days = calendar.dateComponents([.day], from: deadline, to: Date()).day ?? 0
+        } else if deadline < startOfToday {
+            let days = calendar.dateComponents([.day], from: startOfDeadline, to: startOfToday).day ?? 0
             return "\(days)d ago"
         } else {
-            let days = calendar.dateComponents([.day], from: Date(), to: deadline).day ?? 0
+            let days = calendar.dateComponents([.day], from: startOfToday, to: startOfDeadline).day ?? 0
             if days == 1 {
                 return "Tomorrow"
             } else if days < 7 {
