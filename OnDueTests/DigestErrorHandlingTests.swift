@@ -158,7 +158,7 @@ private final class ObligationExtractorStub: ObligationExtracting, @unchecked Se
     func assess(message: MessageRecord, mailboxAccountId: String) async throws -> RuleAssessment {
         throw NSError(domain: "OnDue.Tests", code: -1)
     }
-    func makeObligation(from assessment: RuleAssessment, message: MessageRecord, mailboxAccountId: String, messagePk: Int64) -> ObligationRecord {
+    func makeObligation(from assessment: RuleAssessment, message: MessageRecord, mailboxAccountId: String, messagePk: Int64, email: ParsedEmail? = nil) -> ObligationRecord {
         ObligationRecord(
             mailboxAccountId: mailboxAccountId,
             messagePk: messagePk,

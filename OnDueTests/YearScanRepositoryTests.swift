@@ -176,7 +176,8 @@ final class YearScanRepositoryTests: XCTestCase {
             lastChecked: now,
             coverageSummary: YearScanRunner.coverageSummary,
             scanRangeMonths: 12,
-            scanIntensity: CoverageScanIntensity.balanced.rawValue
+            scanIntensity: CoverageScanIntensity.balanced.rawValue,
+            mergeWithExisting: false
         )
 
         let snapshot = try await repository.fetchLatest()
@@ -429,7 +430,8 @@ final class YearScanRepositoryTests: XCTestCase {
             lastChecked: Date(),
             coverageSummary: YearScanRunner.coverageSummary,
             scanRangeMonths: 12,
-            scanIntensity: CoverageScanIntensity.balanced.rawValue
+            scanIntensity: CoverageScanIntensity.balanced.rawValue,
+            mergeWithExisting: false
         )
 
         try await repository.upsertPartial(
@@ -495,6 +497,128 @@ final class YearScanRepositoryTests: XCTestCase {
         snapshot = try await repository.fetchLatest()
         XCTAssertEqual(snapshot?.isInProgress, false)
         XCTAssertNil(snapshot?.resumeState)
+    }
+
+    func testMultipleFinalizedTokensDoNotInterfere() async throws {
+        try await repository.markInProgress(
+            scannedMessageCount: 0,
+            coverageSummary: YearScanRunner.coverageSummary,
+            statusMessage: "Starting"
+        )
+
+        let item = YearScanItem(
+            mailboxAccountId: "acct",
+            messagePk: 601,
+            providerMessageId: "msg-601",
+            threadId: "thread-601",
+            subject: "Test",
+            snippet: "Test",
+            score: 0.85,
+            matchedReasons: ["test"],
+            source: .scan,
+            promotionDecision: .promoted,
+            promotionReasonCode: .promotedActionable,
+            confidence: 0.85,
+            dueDate: Date()
+        )
+
+        await repository.markRunFinalized(runToken: "run-A")
+        await repository.markRunFinalized(runToken: "run-B")
+
+        try await repository.upsertPartial(
+            items: [item],
+            scannedMessageCount: 50,
+            coverageSummary: YearScanRunner.coverageSummary,
+            statusMessage: "Scanning",
+            resumeState: nil,
+            scanRangeMonths: 12,
+            scanIntensity: CoverageScanIntensity.balanced.rawValue,
+            excludedProviderMessageIds: [],
+            runToken: "run-A",
+            sequence: 1
+        )
+
+        try await repository.upsertPartial(
+            items: [item],
+            scannedMessageCount: 50,
+            coverageSummary: YearScanRunner.coverageSummary,
+            statusMessage: "Scanning",
+            resumeState: nil,
+            scanRangeMonths: 12,
+            scanIntensity: CoverageScanIntensity.balanced.rawValue,
+            excludedProviderMessageIds: [],
+            runToken: "run-B",
+            sequence: 1
+        )
+
+        let newItem = YearScanItem(
+            mailboxAccountId: "acct",
+            messagePk: 602,
+            providerMessageId: "msg-602",
+            threadId: "thread-602",
+            subject: "New",
+            snippet: "New",
+            score: 0.90,
+            matchedReasons: ["new"],
+            source: .scan,
+            promotionDecision: .promoted,
+            promotionReasonCode: .promotedActionable,
+            confidence: 0.90,
+            dueDate: Date()
+        )
+
+        try await repository.upsertPartial(
+            items: [newItem],
+            scannedMessageCount: 100,
+            coverageSummary: YearScanRunner.coverageSummary,
+            statusMessage: "Scanning",
+            resumeState: nil,
+            scanRangeMonths: 12,
+            scanIntensity: CoverageScanIntensity.balanced.rawValue,
+            excludedProviderMessageIds: [],
+            runToken: "run-C",
+            sequence: 1
+        )
+
+        let snapshot = try await repository.fetchLatest()
+        let ids = Set(snapshot?.items.map(\.providerMessageId) ?? [])
+        XCTAssertTrue(ids.contains("msg-602"))
+    }
+
+    func testClearStateRemovesAllData() async throws {
+        let item = YearScanItem(
+            mailboxAccountId: "acct",
+            messagePk: 701,
+            providerMessageId: "msg-701",
+            threadId: "thread-701",
+            subject: "Clear test",
+            snippet: "Clear test",
+            score: 0.80,
+            matchedReasons: ["test"],
+            source: .scan,
+            promotionDecision: .promoted,
+            promotionReasonCode: .promotedActionable,
+            confidence: 0.80,
+            dueDate: Date()
+        )
+
+        try await repository.saveRun(
+            items: [item],
+            scannedMessageCount: 100,
+            lastChecked: Date(),
+            coverageSummary: YearScanRunner.coverageSummary,
+            scanRangeMonths: 12,
+            scanIntensity: CoverageScanIntensity.balanced.rawValue,
+            mergeWithExisting: false
+        )
+
+        var snapshot = try await repository.fetchLatest()
+        XCTAssertEqual(snapshot?.items.count, 1)
+
+        try await repository.clearState()
+
+        snapshot = try await repository.fetchLatest()
+        XCTAssertNil(snapshot)
     }
 }
 

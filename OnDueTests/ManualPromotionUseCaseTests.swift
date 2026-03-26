@@ -122,10 +122,12 @@ final class ManualPromotionUseCaseTests: XCTestCase {
             decisionContract: DecisionContract(
                 outcome: .accept,
                 primaryHypothesisId: ObligationHypothesis.userActionRequired.rawValue,
-                reasonCode: .directRequestWithDeadline,
+                reasonCodes: [.directRequestWithDeadline],
                 reasonText: "Direct request with a clear deadline",
                 evidence: ["request_keyword"],
-                policyVersion: DecisionPolicyVersion.v2PolicyDriven.rawValue
+                policyVersion: DecisionPolicyVersion.v2PolicyDriven.rawValue,
+                matchedHypotheses: [.userActionRequired],
+                confidence: .high
             )
         )
     }
@@ -182,10 +184,12 @@ private final class ObligationExtractorStub: ObligationExtracting, @unchecked Se
         decisionContract: DecisionContract(
             outcome: .accept,
             primaryHypothesisId: ObligationHypothesis.userActionRequired.rawValue,
-            reasonCode: .directRequestWithDeadline,
+            reasonCodes: [.directRequestWithDeadline],
             reasonText: "",
             evidence: [],
-            policyVersion: DecisionPolicyVersion.v2PolicyDriven.rawValue
+            policyVersion: DecisionPolicyVersion.v2PolicyDriven.rawValue,
+            matchedHypotheses: [.userActionRequired],
+            confidence: .high
         )
     )
     var lastMailboxAccountId: String?
@@ -195,7 +199,7 @@ private final class ObligationExtractorStub: ObligationExtracting, @unchecked Se
         lastMailboxAccountId = mailboxAccountId
         return assessment
     }
-    func makeObligation(from assessment: RuleAssessment, message: MessageRecord, mailboxAccountId: String, messagePk: Int64) -> ObligationRecord {
+    func makeObligation(from assessment: RuleAssessment, message: MessageRecord, mailboxAccountId: String, messagePk: Int64, email: ParsedEmail? = nil) -> ObligationRecord {
         ObligationRecord(
             mailboxAccountId: mailboxAccountId,
             messagePk: messagePk,

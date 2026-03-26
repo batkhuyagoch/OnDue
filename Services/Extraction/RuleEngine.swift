@@ -81,10 +81,15 @@ enum ReasonCode: String, Codable, CaseIterable {
 struct DecisionContract: Codable, Hashable {
     let outcome: ObligationDecision
     let primaryHypothesisId: String?
-    let reasonCode: ReasonCode
+    let reasonCodes: [ReasonCode]
     let reasonText: String
     let evidence: [String]
     let policyVersion: String
+    let matchedHypotheses: [ObligationHypothesis]
+    let confidence: HypothesisConfidence
+
+    /// Primary reason code for backward-compatible read access. `reasonCodes` is authoritative.
+    var reasonCode: ReasonCode { reasonCodes.first ?? .other }
 }
 
 enum ReasonCatalog {
@@ -766,10 +771,12 @@ final class RuleEngine {
             decisionContract: DecisionContract(
                 outcome: .accept,
                 primaryHypothesisId: nil,
-                reasonCode: .other,
+                reasonCodes: [.other],
                 reasonText: ReasonCatalog.displayText(for: .other),
                 evidence: matches.map(\.reason),
-                policyVersion: decisionPolicy.version.rawValue
+                policyVersion: decisionPolicy.version.rawValue,
+                matchedHypotheses: [],
+                confidence: .low
             )
         )
     }
@@ -788,13 +795,16 @@ final class RuleEngine {
         let globalBlockers = matchedSignals.filter { globalBlockerSignalIds.contains($0.id) }
         if !globalBlockers.isEmpty {
             let reasons = uniqueReasons(from: globalBlockers)
+            let blockerReasonCode = inferReasonCode(for: .reject, primaryHypothesisId: .marketingNoise, reasons: reasons)
             let contract = DecisionContract(
                 outcome: .reject,
                 primaryHypothesisId: ObligationHypothesis.marketingNoise.rawValue,
-                reasonCode: inferReasonCode(for: .reject, primaryHypothesisId: .marketingNoise, reasons: reasons),
-                reasonText: ReasonCatalog.displayText(for: inferReasonCode(for: .reject, primaryHypothesisId: .marketingNoise, reasons: reasons)),
+                reasonCodes: [blockerReasonCode],
+                reasonText: ReasonCatalog.displayText(for: blockerReasonCode),
                 evidence: reasons,
-                policyVersion: decisionPolicy.version.rawValue
+                policyVersion: decisionPolicy.version.rawValue,
+                matchedHypotheses: [.marketingNoise],
+                confidence: .high
             )
             return RuleAssessment(
                 decision: .reject,
@@ -840,9 +850,11 @@ final class RuleEngine {
             reviewContext: reviewContext
         )
         let reasons = reasonsForOutcome(evaluations)
-        let primaryHypothesis = evaluations
+        let primaryHypothesisEval = evaluations
             .sorted { confidenceRank($0.confidence) > confidenceRank($1.confidence) }
-            .first?.hypothesis
+            .first
+        let primaryHypothesis = primaryHypothesisEval?.hypothesis
+        let contractConfidence = primaryHypothesisEval?.confidence ?? .low
         let reasonCode = inferReasonCode(
             for: decision,
             primaryHypothesisId: primaryHypothesis,
@@ -851,10 +863,12 @@ final class RuleEngine {
         let decisionContract = DecisionContract(
             outcome: decision,
             primaryHypothesisId: primaryHypothesis?.rawValue,
-            reasonCode: reasonCode,
+            reasonCodes: [reasonCode],
             reasonText: ReasonCatalog.displayText(for: reasonCode),
             evidence: reasons,
-            policyVersion: decisionPolicy.version.rawValue
+            policyVersion: decisionPolicy.version.rawValue,
+            matchedHypotheses: evaluations.map { $0.hypothesis },
+            confidence: contractConfidence
         )
         let category = determineCategory(from: matchedSignals, evaluations: evaluations)
         let risk = determineRisk(evaluations: evaluations)

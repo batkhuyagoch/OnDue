@@ -179,7 +179,9 @@ final class RuleEngineTests: XCTestCase {
             senderDomain: "carrier.com",
             hasAttachments: false,
             labelIds: ["inbox"],
-            normalizedText: "delivery attempt failed please reschedule delivery pick up your package by friday"
+            normalizedText: "delivery attempt failed please reschedule delivery pick up your package by friday",
+            actionableWindowText: nil,
+            bodyHtml: nil
         )
         let assessment = engine.assess(email: email)
         if assessment.matchedRuleIds.contains(ObligationHypothesis.deliveryRequired.rawValue) {

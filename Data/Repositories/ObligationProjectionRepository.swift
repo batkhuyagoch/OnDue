@@ -63,8 +63,6 @@ enum ObligationGrouping: String, CaseIterable, Identifiable {
 
 final class ObligationProjectionRepository: ObligationProjectionRepositorying, @unchecked Sendable {
     private let database: Database
-    private let needsReviewThreshold = 0.6
-
     init(database: Database) {
         self.database = database
     }
@@ -105,6 +103,7 @@ final class ObligationProjectionRepository: ObligationProjectionRepositorying, @
     func upsert(obligation: ObligationRecord, in db: GRDB.Database, precomputedPrimaryThreadId: String?) throws {
         let state = resolveState(for: obligation)
         let dueBucket = resolveDueBucket(for: obligation)
+        let surfacingIntent = resolveSurfacingIntent(for: obligation)
 
         var record = ObligationProjectionRecord(
             obligationId: obligation.id,
@@ -116,6 +115,7 @@ final class ObligationProjectionRepository: ObligationProjectionRepositorying, @
             lastActionAt: obligation.updatedAt,
             reasonCode: obligation.reasonCode,
             policyVersion: obligation.policyVersion,
+            surfacingIntent: surfacingIntent,
             updatedAt: Date()
         )
         try record.save(db)
@@ -130,15 +130,34 @@ final class ObligationProjectionRepository: ObligationProjectionRepositorying, @
         case .snoozed:
             return .snoozed
         case .open:
-            if let deadline = obligation.deadlineAt,
-               deadline < Calendar.current.startOfDay(for: Date()) {
+            if let deadline = obligation.deadlineAt, deadline < Date() {
                 return .overdue
             }
-            if obligation.confidence < needsReviewThreshold {
+            let contractConfidence = obligation.contractConfidence
+                .flatMap { HypothesisConfidence(rawValue: $0) } ?? .medium
+            if contractConfidence == .low {
                 return .needsReview
             }
             return .active
         }
+    }
+
+    private func resolveSurfacingIntent(for obligation: ObligationRecord) -> SurfacingIntent {
+        guard obligation.status == .open else { return .suppress }
+        let confidence = obligation.contractConfidence
+            .flatMap { HypothesisConfidence(rawValue: $0) } ?? .medium
+        let matchedHypotheses = Set(
+            obligation.matchedRuleIds
+                .split(separator: ",")
+                .compactMap { ObligationHypothesis(rawValue: String($0).trimmingCharacters(in: .whitespacesAndNewlines)) }
+        )
+        let internalDate = obligation.lastSeenAt ?? obligation.createdAt
+        return SurfacingPolicy.evaluate(
+            deadlineAt: obligation.deadlineAt,
+            internalDate: internalDate,
+            confidence: confidence,
+            matchedHypotheses: matchedHypotheses
+        )
     }
 
     private func resolveDueBucket(for obligation: ObligationRecord) -> ObligationDueBucket {
@@ -177,10 +196,21 @@ final class ObligationProjectionRepository: ObligationProjectionRepositorying, @
     private func modeWhereClause(for mode: DigestMode) -> String {
         switch mode {
         case .now:
+            // needsReview is lifecycle-driven and bypasses surfacing intent (per plan).
+            // All other "now" items require activeUpcoming, activeOverdue, or NULL intent
+            // (NULL = legacy rows before v28 migration; included for backward compat).
             return """
             (
-                p.state IN ('overdue', 'needsReview')
-                OR (p.state = 'active' AND p.dueBucket IN ('today', 'next3Days', 'overdue'))
+                p.state = 'needsReview'
+                OR (
+                    p.state = 'overdue'
+                    AND (p.surfacingIntent IS NULL OR p.surfacingIntent = 'activeOverdue')
+                )
+                OR (
+                    p.state = 'active'
+                    AND p.dueBucket IN ('today', 'next3Days', 'overdue')
+                    AND (p.surfacingIntent IS NULL OR p.surfacingIntent = 'activeUpcoming')
+                )
             )
             """
         case .later:
@@ -200,6 +230,7 @@ final class ObligationProjectionRepository: ObligationProjectionRepositorying, @
             var sql = """
                 SELECT o.*, p.state AS projectionState, p.dueBucket AS projectionDueBucket,
                        p.primaryThreadId AS projectionThreadId, p.lastActionAt AS projectionLastActionAt,
+                       p.surfacingIntent AS projectionSurfacingIntent,
                        m.fromEmail AS messageFromEmail, m.fromDomain AS messageFromDomain
                 FROM obligation_projection p
                 JOIN obligation o ON o.id = p.obligationId
@@ -214,6 +245,7 @@ final class ObligationProjectionRepository: ObligationProjectionRepositorying, @
             sql += """
                 WHERE \(whereClause)
                   AND m.isDeleted = 0
+                  AND (p.surfacingIntent IS NULL OR p.surfacingIntent != 'suppress')
             """
 
             if !query.isEmpty {
@@ -236,6 +268,8 @@ final class ObligationProjectionRepository: ObligationProjectionRepositorying, @
 
                 let primaryThreadId: String? = row["projectionThreadId"]
                 let lastActionAt: Date? = row["projectionLastActionAt"]
+                let surfacingIntentRaw: String? = row["projectionSurfacingIntent"]
+                let surfacingIntent = surfacingIntentRaw.flatMap { SurfacingIntent(rawValue: $0) }
                 let senderEmail: String? = row["messageFromEmail"]
                 let senderDomain: String? = row["messageFromDomain"]
                 return ObligationListItem(
@@ -245,7 +279,8 @@ final class ObligationProjectionRepository: ObligationProjectionRepositorying, @
                     primaryThreadId: primaryThreadId,
                     lastActionAt: lastActionAt,
                     senderEmail: senderEmail,
-                    senderDomain: senderDomain
+                    senderDomain: senderDomain,
+                    surfacingIntent: surfacingIntent
                 )
             }
         }

@@ -426,4 +426,8 @@ private final class SuppressionRepositoryStub: SuppressionRepositorying, @unchec
     func isBlocked(mailboxAccountId: String, sender: String?, domain: String?) async throws -> Bool {
         blocked
     }
+
+    func fetchAllBlocked(mailboxAccountId: String) async throws -> BlockedSendersAndDomains {
+        BlockedSendersAndDomains(senders: [], domains: [])
+    }
 }

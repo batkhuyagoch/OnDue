@@ -188,7 +188,9 @@ enum SampleEmails {
             senderDomain: senderDomain,
             hasAttachments: hasAttachments,
             labelIds: labelIds.map { $0.lowercased() },
-            normalizedText: normalizedText
+            normalizedText: normalizedText,
+            actionableWindowText: nil,
+            bodyHtml: nil
         )
     }
 }

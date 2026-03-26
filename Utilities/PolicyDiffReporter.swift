@@ -104,7 +104,9 @@ enum PolicyDiffReporter {
                     senderDomain: item.senderDomain,
                     hasAttachments: false,
                     labelIds: item.labelIds,
-                    normalizedText: item.normalizedText
+                    normalizedText: item.normalizedText,
+                    actionableWindowText: nil,
+                    bodyHtml: nil
                 ),
                 expectedOutcome: item.expectedOutcome.flatMap { ObligationDecision(rawValue: $0) },
                 expectedHypothesis: item.expectedHypothesis
@@ -182,7 +184,9 @@ struct SyntheticInputSource: EmailInputSource {
                     senderDomain: item.senderDomain,
                     hasAttachments: false,
                     labelIds: item.labelIds,
-                    normalizedText: item.normalizedText
+                    normalizedText: item.normalizedText,
+                    actionableWindowText: nil,
+                    bodyHtml: nil
                 )
             )
         }
@@ -1238,7 +1242,9 @@ private extension ParsedEmail {
             senderDomain: base.senderDomain,
             hasAttachments: base.hasAttachments,
             labelIds: base.labelIds,
-            normalizedText: normalized
+            normalizedText: normalized,
+            actionableWindowText: nil,
+            bodyHtml: nil
         )
     }
 }

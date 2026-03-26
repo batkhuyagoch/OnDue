@@ -114,7 +114,7 @@ enum YearScanBackgroundManager {
                     scanRangeMonths: runConfiguration.rangeMonths,
                     scanIntensity: runConfiguration.intensity.rawValue
                 )
-                let runResult = try await YearScanCoordinator.run(
+                let runResult = try await YearScanRunner.run(
                     environment: environment,
                     resumeState: resumeState,
                     configuration: runConfiguration,
@@ -177,9 +177,10 @@ enum YearScanBackgroundManager {
                     coverageSummary: YearScanRunner.coverageSummary,
                     scanRangeMonths: runConfiguration.rangeMonths,
                     scanIntensity: runConfiguration.intensity.rawValue,
-                    excludedProviderMessageIds: excluded
+                    excludedProviderMessageIds: excluded,
+                    mergeWithExisting: resumed
                 )
-                await YearScanCoordinator.bridgePromotedFindingsToObligations(
+                await YearScanRunner.bridgePromotedFindingsToObligations(
                     environment: environment,
                     items: runResult.items
                 )
@@ -200,7 +201,7 @@ enum YearScanBackgroundManager {
                         "totalMonths": quota.resumeState.totalMonths
                     ]
                 )
-                await YearScanCoordinator.persistPaused(
+                await YearScanRunner.persistPaused(
                     environment: environment,
                     scannedMessageCount: quota.resumeState.scannedMessageCount,
                     statusMessage: "Paused in background due to Gmail API limits.",
@@ -210,7 +211,7 @@ enum YearScanBackgroundManager {
                 scheduleBackfill(requiresCharging: environment.syncPolicyStore.coverageBackgroundRequiresCharging)
                 task.setTaskCompleted(success: true)
             } catch is CancellationError {
-                await YearScanCoordinator.persistPaused(
+                await YearScanRunner.persistPaused(
                     environment: environment,
                     scannedMessageCount: latestScannedCount,
                     statusMessage: latestStatusMessage ?? "Paused in background. Will resume later.",
@@ -227,7 +228,7 @@ enum YearScanBackgroundManager {
 
         task.expirationHandler = {
             Task {
-                await YearScanCoordinator.persistPaused(
+                await YearScanRunner.persistPaused(
                     environment: environment,
                     scannedMessageCount: latestScannedCount,
                     statusMessage: latestStatusMessage ?? "Paused in background due to device constraints. Will resume later.",

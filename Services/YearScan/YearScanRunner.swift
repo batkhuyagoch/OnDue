@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 struct YearScanRunResult {
     let items: [YearScanItem]
@@ -30,135 +31,11 @@ struct YearScanQuotaStoppedError: Error {
     let resumeState: YearScanResumeState
 }
 
-enum YearScanCoordinator {
-    static func run(
-        environment: AppEnvironment,
-        resumeState: YearScanResumeState?,
-        configuration: YearScanRunner.RunConfiguration? = nil,
-        statusUpdate: ((String) -> Void)? = nil,
-        checkpointUpdate: ((YearScanResumeState) -> Void)? = nil,
-        partialUpdate: ((YearScanPartialUpdate) -> Void)? = nil
-    ) async throws -> YearScanRunResult {
-        try await YearScanRunner.run(
-            environment: environment,
-            resumeState: resumeState,
-            configuration: configuration,
-            statusUpdate: statusUpdate,
-            checkpointUpdate: checkpointUpdate,
-            partialUpdate: partialUpdate
-        )
-    }
-
-    static func persistInProgress(
-        environment: AppEnvironment,
-        scannedMessageCount: Int,
-        statusMessage: String?,
-        resumeState: YearScanResumeState?,
-        configuration: YearScanRunner.RunConfiguration
-    ) async {
-        try? await environment.yearScanRepository.markInProgress(
-            scannedMessageCount: scannedMessageCount,
-            coverageSummary: YearScanRunner.coverageSummary,
-            statusMessage: statusMessage,
-            resumeState: resumeState,
-            scanRangeMonths: configuration.rangeMonths,
-            scanIntensity: configuration.intensity.rawValue
-        )
-    }
-
-    static func persistPaused(
-        environment: AppEnvironment,
-        scannedMessageCount: Int,
-        statusMessage: String?,
-        resumeState: YearScanResumeState?,
-        configuration: YearScanRunner.RunConfiguration
-    ) async {
-        try? await environment.yearScanRepository.markPaused(
-            scannedMessageCount: scannedMessageCount,
-            coverageSummary: YearScanRunner.coverageSummary,
-            statusMessage: statusMessage,
-            resumeState: resumeState,
-            scanRangeMonths: configuration.rangeMonths,
-            scanIntensity: configuration.intensity.rawValue
-        )
-    }
-
-    static func clearResumeState(environment: AppEnvironment) async {
-        try? await environment.yearScanRepository.clearResumeState()
-    }
-
-    static func bridgePromotedFindingsToObligations(
-        environment: AppEnvironment,
-        items: [YearScanItem]
-    ) async {
-        let promoted = items.filter { $0.promotionDecision == .promoted }
-        guard !promoted.isEmpty else { return }
-
-        let excludedMessageIDs = (try? await environment.messageStateManager.getExcludedMessageIDsCached(maxAge: 0)) ?? []
-        let grouped = Dictionary(grouping: promoted, by: { $0.mailboxAccountId })
-        var records: [ObligationRecord] = []
-
-        for (mailboxAccountId, accountItems) in grouped {
-            let providerIDs = Set(
-                accountItems
-                    .map(\.providerMessageId)
-                    .filter { !excludedMessageIDs.contains($0) }
-            )
-            guard !providerIDs.isEmpty else { continue }
-
-            let messages = (try? await environment.messageRepository.fetchByProviderMessageIds(
-                mailboxAccountId: mailboxAccountId,
-                providerMessageIds: providerIDs
-            )) ?? []
-
-            for message in messages {
-                guard let messagePk = message.pk else { continue }
-                let isSuppressed = (try? await environment.suppressionRepository.isBlocked(
-                    mailboxAccountId: mailboxAccountId,
-                    sender: message.fromEmail,
-                    domain: message.fromDomain
-                )) ?? false
-                if isSuppressed { continue }
-
-                guard let matchedItem = accountItems.first(where: { $0.providerMessageId == message.providerMessageId }),
-                      matchedItem.promotionDecision == .promoted else {
-                    continue
-                }
-                let assessment = try? await environment.obligationExtractor.assess(
-                    message: message,
-                    mailboxAccountId: mailboxAccountId
-                )
-                guard let assessment else { continue }
-                var record = environment.obligationExtractor.makeObligation(
-                    from: assessment,
-                    message: message,
-                    mailboxAccountId: mailboxAccountId,
-                    messagePk: messagePk
-                )
-                // Preserve year-scan calibrated values instead of re-assessment defaults.
-                record.confidence = matchedItem.confidence
-                record.deadlineAt = matchedItem.dueDate
-                if record.evidenceQuote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    record.evidenceQuote = matchedItem.snippet
-                }
-                records.append(record)
-            }
-        }
-
-        guard !records.isEmpty else { return }
-        try? await environment.obligationRepository.save(records)
-    }
-}
-
 enum YearScanRunner {
     static let coverageSummary = "Inbox, excluding promotions & social"
     private static let pageSize = 500
-    private static let checkpointEveryPages = 10
-    private static let checkpointEverySeconds: TimeInterval = 20
-    private static let partialUpdateEveryPages = 3
-    private static let partialUpdateEverySeconds: TimeInterval = 3
-    private static let workingSetSoftLimit = 1000
-    private static let workingSetHardCap = 700
+    
+    
     
     private static let memorySoftWarningBytes: UInt64 = 450_000_000
     private static let memoryHighPressureBytes: UInt64 = 550_000_000
@@ -166,6 +43,8 @@ enum YearScanRunner {
     private static let hardPauseSeconds: UInt64 = 5
     private static let hardPauseCooldownSeconds: TimeInterval = 20
     private static let recoveryPagesAfterHardPause = 6
+
+    private static let signposter = OSSignposter(subsystem: "com.ondue.yearscan", category: "ScanPipeline")
     
     enum ThrottleReason: String {
         case thermal
@@ -238,7 +117,7 @@ enum YearScanRunner {
                 state.lastHardPauseAt = now
                 return adjustedDecision(
                     ThrottleDecision(
-                    batchSize: 50,
+                    batchSize: 30,
                     pauseSeconds: hardPauseSeconds,
                     reason: state.lastReason,
                     userFacingStatus: "Optimizing for device memory and temperature..."
@@ -248,7 +127,7 @@ enum YearScanRunner {
             }
             return adjustedDecision(
                 ThrottleDecision(
-                batchSize: 75,
+                batchSize: 50,
                 pauseSeconds: 0,
                 reason: state.lastReason,
                 userFacingStatus: "Reducing scan speed to keep the app responsive..."
@@ -261,7 +140,7 @@ enum YearScanRunner {
             state.lastReason = .lowPower
             return adjustedDecision(
                 ThrottleDecision(
-                batchSize: 120,
+                batchSize: 80,
                 pauseSeconds: 0,
                 reason: .lowPower,
                 userFacingStatus: "Low Power Mode is on, scanning gently..."
@@ -274,7 +153,7 @@ enum YearScanRunner {
             state.lastReason = .memory
             return adjustedDecision(
                 ThrottleDecision(
-                batchSize: 100,
+                batchSize: 70,
                 pauseSeconds: 0,
                 reason: .memory,
                 userFacingStatus: "Optimizing for device memory..."
@@ -287,7 +166,7 @@ enum YearScanRunner {
             state.lastReason = .memory
             return adjustedDecision(
                 ThrottleDecision(
-                batchSize: 150,
+                batchSize: 120,
                 pauseSeconds: 0,
                 reason: .memory,
                 userFacingStatus: "Reducing scan speed to keep the app responsive..."
@@ -301,7 +180,7 @@ enum YearScanRunner {
             state.lastReason = .recovery
             return adjustedDecision(
                 ThrottleDecision(
-                batchSize: 200,
+                batchSize: 150,
                 pauseSeconds: 0,
                 reason: .recovery,
                 userFacingStatus: "Resuming normal speed..."
@@ -425,40 +304,9 @@ enum YearScanRunner {
         #endif
     }
     
-    private static func shouldCheckpoint(page: Int, lastCheckpointAt: Date, now: Date) -> Bool {
-        if page % checkpointEveryPages == 0 { return true }
-        return now.timeIntervalSince(lastCheckpointAt) >= checkpointEverySeconds
-    }
-
-    private static func shouldEmitPartial(
-        page: Int,
-        lastPartialAt: Date,
-        lastPartialPage: Int,
-        now: Date
-    ) -> Bool {
-        if page - lastPartialPage >= partialUpdateEveryPages {
-            return true
-        }
-        return now.timeIntervalSince(lastPartialAt) >= partialUpdateEverySeconds
-    }
     
-    private static func trimWorkingSet(_ bestByThread: [String: YearScanItem]) -> [String: YearScanItem] {
-        guard bestByThread.count > workingSetHardCap else { return bestByThread }
-        let kept = bestByThread.values
-            .sorted {
-                if $0.score != $1.score {
-                    return $0.score > $1.score
-                }
-                if $0.detectedAt != $1.detectedAt {
-                    return $0.detectedAt > $1.detectedAt
-                }
-                return $0.id < $1.id
-            }
-            .prefix(workingSetHardCap)
-        return Dictionary(
-            uniqueKeysWithValues: kept.map { (normalizedThreadKey(threadId: $0.threadId, providerMessageId: $0.providerMessageId), $0) }
-        )
-    }
+    
+    
     
     private static func memoryMB(_ bytes: UInt64) -> UInt64 {
         bytes / 1_000_000
@@ -491,11 +339,9 @@ enum YearScanRunner {
         partialUpdate: ((YearScanPartialUpdate) -> Void)? = nil
     ) async throws -> YearScanRunResult {
         let runStartedAt = Date()
+        let scanSignpostID = signposter.makeSignpostID()
+        let scanState = signposter.beginInterval("FullScan", id: scanSignpostID)
         var peakMemoryBytes = captureRuntimeSnapshot().memoryUsedBytes
-        var pagesScanned = 0
-        var totalBatchSize = 0
-        var minBatchSize = Int.max
-        var maxBatchSize = 0
         let accounts = try await environment.mailboxAccountRepository.fetchAll()
         var collected: [YearScanItem] = []
         var scannedMessageCount = resumeState?.scannedMessageCount ?? 0
@@ -508,7 +354,6 @@ enum YearScanRunner {
         let startDate = Calendar.current.date(byAdding: .month, value: -clampedRangeMonths, to: endDate) ?? endDate
         let monthRanges = buildMonthRanges(startDate: startDate, endDate: endDate)
         let totalMonths = monthRanges.count
-        let scanDays = max(1, Calendar.current.dateComponents([.day], from: startDate, to: endDate).day ?? 365)
         let normalizedResumeState = normalizeResumeState(
             resumeState,
             accountsCount: accounts.count,
@@ -518,6 +363,8 @@ enum YearScanRunner {
         var throttleState = ThrottleState()
         var monthSummaries = normalizedResumeState?.monthSummaries ?? []
         var providerMonthLabelByMessageId: [String: String] = [:]
+        var accumulatedClassifiedByThread: [String: YearScanItem] = [:]
+        var accumulatedClassifiedMessageIds: Set<String> = Set()
 
         Logger.info("YearScan: start (\(accounts.count) accounts)")
         let accountStart = min(max(normalizedResumeState?.accountIndex ?? 0, 0), max(accounts.count - 1, 0))
@@ -567,6 +414,8 @@ enum YearScanRunner {
                     checkpointUpdate?(state)
                 }
                 let backfillReport: SyncReport
+                let backfillSignpostID = signposter.makeSignpostID()
+                let backfillState = signposter.beginInterval("MonthBackfill", id: backfillSignpostID, "\(activeMonthLabel)")
                 do {
                     backfillReport = try await environment.gmailSyncCoordinator.backfill(
                         mailboxAccountId: account.id,
@@ -574,7 +423,9 @@ enum YearScanRunner {
                         endDate: range.end,
                         daysBackForExtraction: 0
                     )
+                    signposter.endInterval("MonthBackfill", backfillState)
                 } catch {
+                    signposter.endInterval("MonthBackfill", backfillState)
                     if isQuotaRelatedError(error) {
                         let resumable = currentResumeState ?? YearScanResumeState(
                             accountIndex: accountIndex,
@@ -599,16 +450,37 @@ enum YearScanRunner {
                 }
                 backfillSavedTotal += backfillReport.messagesSavedCount
                 let monthClassification: (promoted: Int, expected: Int, dropped: Int)
+                let classifySignpostID = signposter.makeSignpostID()
+                let classifyState = signposter.beginInterval("MonthClassify", id: classifySignpostID, "\(activeMonthLabel)")
                 do {
                     statusUpdate?("Classifying: \(activeMonthLabel)...")
-                    monthClassification = try await classifyMonthSlice(
+                    let classResult = try await classifyMonthSlice(
                         environment: environment,
                         mailboxAccountId: account.id,
                         startDate: range.start,
                         endDate: range.end,
                         excludedProviderMessageIds: excludedIDs
                     )
+                    monthClassification = (classResult.promoted, classResult.expected, classResult.dropped)
+                    for (key, item) in classResult.classifiedItems {
+                        if let existing = accumulatedClassifiedByThread[key] {
+                            if item.isHigherPriority(than: existing) {
+                                accumulatedClassifiedByThread[key] = item
+                            }
+                        } else {
+                            accumulatedClassifiedByThread[key] = item
+                        }
+                    }
+                    accumulatedClassifiedMessageIds.formUnion(
+                        classResult.classifiedItems.values.map(\.providerMessageId)
+                    )
+                    for item in classResult.classifiedItems.values {
+                        providerMonthLabelByMessageId[item.providerMessageId] = activeMonthLabel
+                    }
+                    await Task.yield()
+                    signposter.endInterval("MonthClassify", classifyState)
                 } catch {
+                    signposter.endInterval("MonthClassify", classifyState)
                     Logger.info(
                         "YearScan: classify slice failed month=\(monthIndex)/\(totalMonths) error=\(error.localizedDescription)"
                     )
@@ -656,196 +528,14 @@ enum YearScanRunner {
             // Checkpoint WAL after backfill to prevent unbounded growth
             try? await environment.database.checkpoint()
 
-            var beforeDate: Date?
-            var beforePk: Int64?
-            var page = 0
-            var bestByThread: [String: YearScanItem] = [:]
-            var lastCheckpointAt = Date.distantPast
-            var lastPartialUpdateAt = Date.distantPast
-            var lastPartialUpdatePage = 0
-            
-            while true {
-                try Task.checkCancellation()
-                let snapshot = captureRuntimeSnapshot()
-                peakMemoryBytes = max(peakMemoryBytes, snapshot.memoryUsedBytes)
-                let now = Date()
-                let decision = makeThrottleDecision(
-                    snapshot: snapshot,
-                    now: now,
-                    state: &throttleState,
-                    intensity: activeConfig.intensity
-                )
-                if let reason = decision.reason {
-                    Logger.info(
-                        "YearScan: throttle reason=\(reason.rawValue) thermal=\(thermalLabel(snapshot.thermalState)) lowPower=\(snapshot.isLowPowerModeEnabled) memoryMB=\(memoryMB(snapshot.memoryUsedBytes)) batch=\(decision.batchSize) pause=\(decision.pauseSeconds)s"
-                    )
-                } else if snapshot.memoryUsedBytes >= memorySoftWarningBytes {
-                    Logger.info(
-                        "YearScan: memory warning thermal=\(thermalLabel(snapshot.thermalState)) memoryMB=\(memoryMB(snapshot.memoryUsedBytes))"
-                    )
-                }
-                if decision.shouldPause {
-                    statusUpdate?("Scanning paused briefly. \(decision.userFacingStatus ?? "Optimizing for device constraints...")")
-                    Logger.info("YearScan: pausing for \(decision.pauseSeconds)s due to device constraints")
-                    try? await Task.sleep(nanoseconds: decision.pauseSeconds * 1_000_000_000)
-                }
-                if bestByThread.count > workingSetSoftLimit || snapshot.memoryUsedBytes >= memoryHighPressureBytes {
-                    let before = bestByThread.count
-                    bestByThread = trimWorkingSet(bestByThread)
-                    let after = bestByThread.count
-                    if after < before {
-                        Logger.info("YearScan: trimmed working set from \(before) to \(after) items")
-                    }
-                }
-
-                let status = "Scanning inbox..."
-                statusUpdate?(status)
-                
-                let currentPageSize = max(50, decision.batchSize)
-                totalBatchSize += currentPageSize
-                minBatchSize = min(minBatchSize, currentPageSize)
-                maxBatchSize = max(maxBatchSize, currentPageSize)
-                
-                let messages = try await environment.messageRepository.fetchRecentPage(
-                    mailboxAccountId: account.id,
-                    daysBack: scanDays,
-                    beforeDate: beforeDate,
-                    beforePk: beforePk,
-                    limit: currentPageSize
-                )
-
-                guard !messages.isEmpty else {
-                    Logger.info("YearScan: account=\(account.emailAddress) page=\(page) done")
-                    break
-                }
-                
-                // Filter out messages that have been deleted, dismissed, or archived locally
-                // UserActionRecord.messageID corresponds to MessageRecord.providerMessageId
-                let filteredMessages = messages.filter { !excludedIDs.contains($0.providerMessageId) }
-                for message in filteredMessages {
-                    providerMonthLabelByMessageId[message.providerMessageId] = monthLabel(for: message.internalDate)
-                }
-
-                page += 1
-                pagesScanned += 1
-                scannedMessageCount += messages.count  // Track total fetched for cursor management
-                let scanningStatusBase = "Scanning inbox... \(scannedMessageCount) messages"
-                let scanningStatus: String
-                if let note = decision.userFacingStatus {
-                    scanningStatus = "\(scanningStatusBase) • \(note)"
-                } else {
-                    scanningStatus = scanningStatusBase
-                }
-                statusUpdate?(scanningStatus)
-
-                if !filteredMessages.isEmpty {
-                    if let oldest = filteredMessages.last?.internalDate {
-                        Logger.info("YearScan: account=\(account.emailAddress) page=\(page) fetched=\(messages.count) filtered=\(filteredMessages.count) oldest=\(oldest)")
-                    } else {
-                        Logger.info("YearScan: account=\(account.emailAddress) page=\(page) fetched=\(messages.count) filtered=\(filteredMessages.count)")
-                    }
-
-                    let memoryBeforeExtraction = captureRuntimeSnapshot().memoryUsedBytes
-                    let scanned = try await environment.obligationExtractor.scanYear(
-                        messages: filteredMessages,
-                        mailboxAccountId: account.id
-                    )
-                    let memoryAfterExtraction = captureRuntimeSnapshot().memoryUsedBytes
-                    peakMemoryBytes = max(peakMemoryBytes, memoryAfterExtraction)
-                    Logger.info(
-                        "YearScan: page=\(page) memoryMB extraction_before=\(memoryMB(memoryBeforeExtraction)) extraction_after=\(memoryMB(memoryAfterExtraction))"
-                    )
-
-                    autoreleasepool {
-                        for item in scanned {
-                            let key = normalizedThreadKey(threadId: item.threadId, providerMessageId: item.providerMessageId)
-                            if let existing = bestByThread[key] {
-                                if item.isHigherPriority(than: existing) {
-                                    bestByThread[key] = item
-                                }
-                            } else {
-                                bestByThread[key] = item
-                            }
-                        }
-                    }
-                } else {
-                    Logger.info("YearScan: account=\(account.emailAddress) page=\(page) fetched=\(messages.count) all filtered out")
-                }
-
-                guard let last = messages.last, let lastPk = last.pk else {
-                    Logger.info("YearScan: account=\(account.emailAddress) page=\(page) missing cursor, stopping")
-                    break
-                }
-
-                // Use unfiltered messages for pagination cursor to avoid skipping data
-                beforeDate = last.internalDate
-                beforePk = lastPk
-                currentResumeState = YearScanResumeState(
-                    accountIndex: accountIndex,
-                    monthIndex: totalMonths,
-                    totalMonths: totalMonths,
-                    phase: .scanning,
-                    beforeDate: beforeDate,
-                    beforePk: beforePk,
-                    scannedMessageCount: scannedMessageCount,
-                    lastStatusMessage: scanningStatus,
-                    consecutiveQuotaHits: 0,
-                    lastThrottleReason: decision.reason?.rawValue,
-                    lastKnownMemoryBytes: snapshot.memoryUsedBytes,
-                    lastKnownThermalState: thermalLabel(snapshot.thermalState),
-                    lastKnownBatchSize: currentPageSize,
-                    configuredRangeMonths: clampedRangeMonths,
-                    configuredIntensity: activeConfig.intensity.rawValue,
-                    currentMonthLabel: monthLabel(for: messages.last?.internalDate ?? Date()),
-                    currentPage: page,
-                    monthSummaries: buildMonthSummaries(
-                        from: bestByThread,
-                        providerMonthLabels: providerMonthLabelByMessageId,
-                        existingSummaries: monthSummaries
-                    )
-                )
-                monthSummaries = currentResumeState?.monthSummaries ?? monthSummaries
-                if let state = currentResumeState {
-                    checkpointUpdate?(state)
-                    if shouldEmitPartial(
-                        page: page,
-                        lastPartialAt: lastPartialUpdateAt,
-                        lastPartialPage: lastPartialUpdatePage,
-                        now: now
-                    ) {
-                        partialUpdate?(
-                            YearScanPartialUpdate(
-                                items: sortItems(Array(bestByThread.values)),
-                                scannedMessageCount: scannedMessageCount,
-                                resumeState: state,
-                                statusMessage: scanningStatus
-                            )
-                        )
-                        lastPartialUpdateAt = now
-                        lastPartialUpdatePage = page
-                    }
-                }
-                
-                // Periodic checkpoint to keep sqlite/WAL memory bounded during long scans.
-                if shouldCheckpoint(page: page, lastCheckpointAt: lastCheckpointAt, now: now) {
-                    try? await environment.database.checkpoint()
-                    lastCheckpointAt = now
-                }
-
-                if messages.count < currentPageSize {
-                    Logger.info("YearScan: account=\(account.emailAddress) page=\(page) reached end of range")
-                    break
-                }
-            }
-
-            collected.append(contentsOf: bestByThread.values)
+            collected.append(contentsOf: accumulatedClassifiedByThread.values)
             if let state = currentResumeState {
                 partialUpdate?(
                     YearScanPartialUpdate(
-                        items: sortItems(Array(bestByThread.values)),
+                        items: sortItems(collected),
                         scannedMessageCount: scannedMessageCount,
                         resumeState: state,
-                        statusMessage: state.lastStatusMessage ?? "Scanning inbox..."
+                        statusMessage: state.lastStatusMessage ?? "Finalizing results..."
                     )
                 )
             }
@@ -853,15 +543,14 @@ enum YearScanRunner {
 
         let sorted = sortItems(collected)
         let elapsedSeconds = Date().timeIntervalSince(runStartedAt)
-        let effectiveBatchSize = pagesScanned > 0 ? (totalBatchSize / pagesScanned) : 0
         let telemetry = YearScanRunTelemetry(
             stopReason: "completed",
             elapsedSeconds: elapsedSeconds,
             peakMemoryMB: memoryMB(peakMemoryBytes),
-            pagesScanned: pagesScanned,
-            effectiveBatchSize: effectiveBatchSize,
-            minBatchSize: pagesScanned > 0 ? minBatchSize : 0,
-            maxBatchSize: maxBatchSize
+            pagesScanned: totalMonths,
+            effectiveBatchSize: 0,
+            minBatchSize: 0,
+            maxBatchSize: 0
         )
         AppLog.info(
             "YearScan.run.completed",
@@ -876,6 +565,16 @@ enum YearScanRunner {
             ]
         )
         Logger.info("YearScan: done scanned=\(scannedMessageCount) results=\(sorted.count)")
+        PerfMetrics.logScanRun(PerfMetrics.ScanRunSummary(
+            elapsedSeconds: elapsedSeconds,
+            peakMemoryMB: memoryMB(peakMemoryBytes),
+            pagesScanned: totalMonths,
+            monthsBackfilled: totalMonths,
+            messagesClassified: scannedMessageCount,
+            throttleEvents: throttleState.recoveryPagesRemaining > 0 ? 1 : 0,
+            averageBatchSize: 0
+        ))
+        signposter.endInterval("FullScan", scanState)
         return YearScanRunResult(
             items: sorted,
             scannedMessageCount: scannedMessageCount,
@@ -911,10 +610,14 @@ enum YearScanRunner {
         return ranges
     }
 
+    private static let monthFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MMM yyyy"
+        return f
+    }()
+
     private static func monthLabel(for date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "MMM yyyy"
-        return formatter.string(from: date)
+        monthFormatter.string(from: date)
     }
 
     private static func upsertMonthSummary(
@@ -959,28 +662,12 @@ enum YearScanRunner {
         }
     }
 
-    private static func buildMonthSummaries(
-        from bestByThread: [String: YearScanItem],
-        providerMonthLabels: [String: String],
-        existingSummaries: [YearScanMonthSummary]
+    private static func applyCounts(
+        _ counts: [String: (promoted: Int, expected: Int, dropped: Int)],
+        to existingSummaries: [YearScanMonthSummary]
     ) -> [YearScanMonthSummary] {
-        var aggregated: [String: (promoted: Int, expected: Int, dropped: Int)] = [:]
-        for item in bestByThread.values {
-            let month = providerMonthLabels[item.providerMessageId] ?? "Unknown"
-            var bucket = aggregated[month] ?? (0, 0, 0)
-            switch item.promotionDecision {
-            case .promoted:
-                bucket.promoted += 1
-            case .expectedEvent:
-                bucket.expected += 1
-            case .dropped:
-                bucket.dropped += 1
-            }
-            aggregated[month] = bucket
-        }
-
-        var merged: [YearScanMonthSummary] = existingSummaries
-        for (label, counts) in aggregated {
+        var merged = existingSummaries
+        for (label, bucket) in counts {
             let existing = merged.first(where: { $0.monthLabel == label })
             let monthIndex = existing?.monthIndex ?? Int.max
             merged = upsertMonthSummary(
@@ -988,9 +675,9 @@ enum YearScanRunner {
                 label: label,
                 monthIndex: monthIndex,
                 messagesScanned: existing?.messagesScanned ?? 0,
-                promotedCount: counts.promoted,
-                expectedCount: counts.expected,
-                droppedCount: counts.dropped,
+                promotedCount: bucket.promoted,
+                expectedCount: bucket.expected,
+                droppedCount: bucket.dropped,
                 isInProgress: existing?.isInProgress ?? false,
                 completedAt: existing?.completedAt
             )
@@ -1004,13 +691,14 @@ enum YearScanRunner {
         startDate: Date,
         endDate: Date,
         excludedProviderMessageIds: Set<String>
-    ) async throws -> (promoted: Int, expected: Int, dropped: Int) {
+    ) async throws -> (promoted: Int, expected: Int, dropped: Int, classifiedItems: [String: YearScanItem]) {
         var beforeDate: Date?
         var beforePk: Int64?
         var bestByThread: [String: YearScanItem] = [:]
 
         while true {
             try Task.checkCancellation()
+            await Task.yield()
             let messages = try await environment.messageRepository.fetchInDateRangePage(
                 mailboxAccountId: mailboxAccountId,
                 startDate: startDate,
@@ -1059,7 +747,7 @@ enum YearScanRunner {
                 dropped += 1
             }
         }
-        return (promoted, expected, dropped)
+        return (promoted, expected, dropped, classifiedItems: bestByThread)
     }
 
     private static func isQuotaRelatedError(_ error: Error) -> Bool {
@@ -1067,5 +755,106 @@ enum YearScanRunner {
             return code == 429 || code == 403
         }
         return false
+    }
+
+    // MARK: - Lifecycle helpers
+
+    static func persistInProgress(
+        environment: AppEnvironment,
+        scannedMessageCount: Int,
+        statusMessage: String?,
+        resumeState: YearScanResumeState?,
+        configuration: RunConfiguration
+    ) async {
+        try? await environment.yearScanRepository.markInProgress(
+            scannedMessageCount: scannedMessageCount,
+            coverageSummary: coverageSummary,
+            statusMessage: statusMessage,
+            resumeState: resumeState,
+            scanRangeMonths: configuration.rangeMonths,
+            scanIntensity: configuration.intensity.rawValue
+        )
+    }
+
+    static func persistPaused(
+        environment: AppEnvironment,
+        scannedMessageCount: Int,
+        statusMessage: String?,
+        resumeState: YearScanResumeState?,
+        configuration: RunConfiguration
+    ) async {
+        try? await environment.yearScanRepository.markPaused(
+            scannedMessageCount: scannedMessageCount,
+            coverageSummary: coverageSummary,
+            statusMessage: statusMessage,
+            resumeState: resumeState,
+            scanRangeMonths: configuration.rangeMonths,
+            scanIntensity: configuration.intensity.rawValue
+        )
+    }
+
+    static func clearResumeState(environment: AppEnvironment) async {
+        try? await environment.yearScanRepository.clearResumeState()
+    }
+
+    static func bridgePromotedFindingsToObligations(
+        environment: AppEnvironment,
+        items: [YearScanItem]
+    ) async {
+        let promoted = items.filter { $0.promotionDecision == .promoted }
+        guard !promoted.isEmpty else { return }
+
+        let excludedMessageIDs = (try? await environment.messageStateManager.getExcludedMessageIDsCached(maxAge: 0)) ?? []
+        let grouped = Dictionary(grouping: promoted, by: { $0.mailboxAccountId })
+        var records: [ObligationRecord] = []
+
+        for (mailboxAccountId, accountItems) in grouped {
+            let providerIDs = Set(
+                accountItems
+                    .map(\.providerMessageId)
+                    .filter { !excludedMessageIDs.contains($0) }
+            )
+            guard !providerIDs.isEmpty else { continue }
+
+            let blocked = (try? await environment.suppressionRepository.fetchAllBlocked(
+                mailboxAccountId: mailboxAccountId
+            )) ?? BlockedSendersAndDomains(senders: [], domains: [])
+
+            let messages = (try? await environment.messageRepository.fetchByProviderMessageIds(
+                mailboxAccountId: mailboxAccountId,
+                providerMessageIds: providerIDs
+            )) ?? []
+
+            for message in messages {
+                guard let messagePk = message.pk else { continue }
+                if blocked.isBlocked(sender: message.fromEmail, domain: message.fromDomain) { continue }
+
+                guard let matchedItem = accountItems.first(where: { $0.providerMessageId == message.providerMessageId }),
+                      matchedItem.promotionDecision == .promoted else {
+                    continue
+                }
+                let assessment = try? await environment.obligationExtractor.assess(
+                    message: message,
+                    mailboxAccountId: mailboxAccountId
+                )
+                guard let assessment else { continue }
+                var record = environment.obligationExtractor.makeObligation(
+                    from: assessment,
+                    message: message,
+                    mailboxAccountId: mailboxAccountId,
+                    messagePk: messagePk,
+                    email: nil
+                )
+                record.confidence = matchedItem.confidence
+                record.deadlineAt = matchedItem.dueDate
+                if record.evidenceQuote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    record.evidenceQuote = matchedItem.snippet
+                }
+                records.append(record)
+            }
+        }
+
+        guard !records.isEmpty else { return }
+        try? await environment.obligationRepository.save(records)
     }
 }

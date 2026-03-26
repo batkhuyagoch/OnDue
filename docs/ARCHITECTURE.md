@@ -1,6 +1,6 @@
 # OnDue Architecture
 
-Last updated: 2026-02-23
+Last updated: 2026-03-19
 
 ## Product Intent
 
@@ -111,6 +111,57 @@ Store generated policy/reliability/drift evidence under:
 
 Recommended report naming:
 - `mutation-weekly-YYYY-MM-DD.md`
+
+## Performance Profiling Workflow
+
+### Instrumented Stages
+
+The Year Scan pipeline is instrumented with `os_signpost` intervals in `YearScanRunner`:
+
+| Signpost Name     | Scope                         | What it measures                          |
+|-------------------|-------------------------------|-------------------------------------------|
+| `FullScan`        | Entire `run()` call           | End-to-end scan time                      |
+| `MonthBackfill`   | Per-month backfill call       | Gmail API fetch + local persist per month |
+| `MonthClassify`   | Per-month classification      | `obligationExtractor.scanYear` per month  |
+| `PageExtraction`  | Per-page in scanning loop     | Classification of a single message batch  |
+
+### How to Profile
+
+1. Open Instruments, attach to OnDue on device/simulator.
+2. Add the `os_signpost` instrument (or `Points of Interest`).
+3. Filter by subsystem `com.ondue.yearscan`.
+4. Start a Year Scan in the app and observe interval durations.
+5. Also use Time Profiler to identify CPU hotspots within signpost intervals.
+
+### Structured Metrics
+
+`PerfMetrics.logScanRun()` emits a single structured log line at scan completion with:
+- elapsed seconds, peak memory MB, pages scanned
+- months backfilled, messages classified
+- throttle event count, average batch size
+
+Search console/logs for `PerfMetrics.ScanRun` to find these entries.
+
+### Reproducible Benchmark Protocol
+
+To compare before/after for performance changes:
+
+1. **Same mailbox**: Use a consistent test account with a known message volume.
+2. **Same simulator/device**: Pin to a specific device model (e.g., iPhone 14 Pro simulator).
+3. **Same scan range**: Use a fixed `coverageScanMonths` (e.g., 12 months).
+4. **Same intensity**: Use `balanced` intensity.
+5. **Fresh state**: Clear year scan state before each run (`clearState`).
+6. **Record**: Capture the `PerfMetrics.ScanRun` log line and Instruments trace.
+7. **Compare**: Side-by-side the metrics and signpost durations.
+
+### Acceptance Gates
+
+A performance PR passes when:
+- Full scan remains responsive during active interaction (no visible hangs).
+- `PerfMetrics.ScanRun` elapsed time is equal or better vs baseline.
+- Peak memory is equal or better vs baseline.
+- No regression in month summary correctness or promotion results.
+- Profiling evidence (Instruments trace or log comparison) is included in the PR.
 
 ## Near-Term Roadmap
 

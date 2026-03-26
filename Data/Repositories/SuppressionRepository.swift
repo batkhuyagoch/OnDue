@@ -1,10 +1,28 @@
 import Foundation
 import GRDB
 
+struct BlockedSendersAndDomains: Sendable {
+    let senders: Set<String>
+    let domains: Set<String>
+
+    func isBlocked(sender: String?, domain: String?) -> Bool {
+        if let s = sender?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+           !s.isEmpty, senders.contains(s) {
+            return true
+        }
+        if let d = domain?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+           !d.isEmpty, domains.contains(d) {
+            return true
+        }
+        return false
+    }
+}
+
 protocol SuppressionRepositorying: Sendable {
     func addSender(mailboxAccountId: String, sender: String) async throws
     func addDomain(mailboxAccountId: String, domain: String) async throws
     func isBlocked(mailboxAccountId: String, sender: String?, domain: String?) async throws -> Bool
+    func fetchAllBlocked(mailboxAccountId: String) async throws -> BlockedSendersAndDomains
 }
 
 final class SuppressionRepository: SuppressionRepositorying, @unchecked Sendable {
@@ -56,6 +74,26 @@ final class SuppressionRepository: SuppressionRepositorying, @unchecked Sendable
             }
 
             return false
+        }
+    }
+
+    func fetchAllBlocked(mailboxAccountId: String) async throws -> BlockedSendersAndDomains {
+        try await database.readAsync { db in
+            let records = try SuppressionRecord
+                .filter(Column("isEnabled") == true)
+                .filter(Column("mailboxAccountId") == mailboxAccountId || Column("mailboxAccountId") == nil)
+                .fetchAll(db)
+
+            var senders = Set<String>()
+            var domains = Set<String>()
+            for record in records {
+                switch record.type {
+                case .sender: senders.insert(record.value)
+                case .domain: domains.insert(record.value)
+                case .subjectPattern: break
+                }
+            }
+            return BlockedSendersAndDomains(senders: senders, domains: domains)
         }
     }
 

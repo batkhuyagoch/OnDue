@@ -122,7 +122,6 @@
  
 ViewModels/
   - DigestViewModel.swift
-  - YearScanViewModel.swift
  
 Views/
   - DigestView.swift

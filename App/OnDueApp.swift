@@ -27,11 +27,11 @@ struct OnDueApp: App {
                     }
                 }
                 .task {
-                    // Note: Session restore now happens in AuthenticationState.checkSignInStatus()
                     BackgroundSyncManager.scheduleIfEnabled(environment: environmentStore.value)
-                    
-                    // Setup daily digest notifications
                     await setupNotifications()
+                    if SmartDeadlineExtractor.needsReextraction {
+                        await SmartDeadlineExtractor.reextractAll(database: environmentStore.value.database)
+                    }
                 }
         }
     }

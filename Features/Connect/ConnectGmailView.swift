@@ -244,45 +244,12 @@ struct ConnectGmailView: View {
                             } label: {
                                 HStack {
                                     Image(systemName: "play.circle")
-                                    Text("Resume backfill")
+                                    Text("Resume history search")
                                 }
                                 .frame(maxWidth: .infinity)
                             }
                             .buttonStyle(.bordered)
                             .disabled(viewModel.isSyncing || viewModel.isBackfilling)
-                        }
-
-                        Button {
-                            Task {
-                                await viewModel.backfillLast12Months(using: environment.value)
-                            }
-                        } label: {
-                            HStack {
-                                if viewModel.isBackfilling {
-                                    ProgressView()
-                                        .progressViewStyle(.circular)
-                                        .scaleEffect(0.8)
-                                } else {
-                                    Image(systemName: "clock.arrow.circlepath")
-                                }
-                                Text(viewModel.backfillResumableState != nil ? "Restart 12-month backfill" : "Backfill 12 months")
-                            }
-                            .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(viewModel.isSyncing || viewModel.isBackfilling)
-
-                        if viewModel.isBackfilling {
-                            Button(role: .destructive) {
-                                viewModel.stopBackfill()
-                            } label: {
-                                HStack {
-                                    Image(systemName: "stop.circle")
-                                    Text("Stop backfill")
-                                }
-                                .frame(maxWidth: .infinity)
-                            }
-                            .buttonStyle(.bordered)
                         }
 
                         Button(role: .destructive) {

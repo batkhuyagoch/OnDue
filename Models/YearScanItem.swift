@@ -36,6 +36,7 @@ struct YearScanItem: Identifiable, Hashable {
     let promotionReasonCode: LongScanPromotionReasonCode
     let confidence: Double
     let dueDate: Date?
+    let deadlineSource: DeadlineSource?
     let detectedAt: Date
 
     init(
@@ -52,6 +53,7 @@ struct YearScanItem: Identifiable, Hashable {
         promotionReasonCode: LongScanPromotionReasonCode = .promotedActionable,
         confidence: Double = 0.8,
         dueDate: Date? = nil,
+        deadlineSource: DeadlineSource? = nil,
         detectedAt: Date = Date()
     ) {
         self.mailboxAccountId = mailboxAccountId
@@ -67,6 +69,7 @@ struct YearScanItem: Identifiable, Hashable {
         self.promotionReasonCode = promotionReasonCode
         self.confidence = confidence
         self.dueDate = dueDate
+        self.deadlineSource = deadlineSource
         self.detectedAt = detectedAt
         self.id = "\(mailboxAccountId)_\(messagePk)"
     }

@@ -4,7 +4,7 @@ import Foundation
 protocol ObligationExtracting: Sendable {
     func extract(from messages: [MessageRecord], mailboxAccountId: String) async throws -> [ObligationRecord]
     func assess(message: MessageRecord, mailboxAccountId: String) async throws -> RuleAssessment
-    func makeObligation(from assessment: RuleAssessment, message: MessageRecord, mailboxAccountId: String, messagePk: Int64) -> ObligationRecord
+    func makeObligation(from assessment: RuleAssessment, message: MessageRecord, mailboxAccountId: String, messagePk: Int64, email: ParsedEmail?) -> ObligationRecord
     func scanYear(messages: [MessageRecord], mailboxAccountId: String) async throws -> [YearScanItem]
 }
 
@@ -44,7 +44,7 @@ final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
     func extract(from messages: [MessageRecord], mailboxAccountId: String) async throws -> [ObligationRecord] {
         let multipliers = try await ruleWeightRepository.fetchMultipliers(mailboxAccountId: mailboxAccountId)
         let reviewCalibration = try await hypothesisReviewCalibrationRepository.fetchSnapshot(mailboxAccountId: mailboxAccountId)
-        var acceptedByThread: [String: (assessment: RuleAssessment, message: MessageRecord, messagePk: Int64)] = [:]
+        var acceptedByThread: [String: (assessment: RuleAssessment, message: MessageRecord, messagePk: Int64, email: ParsedEmail)] = [:]
 
         for message in messages {
             guard let pk = message.pk else { continue }
@@ -77,10 +77,10 @@ final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
                 )
                 if let existing = acceptedByThread[threadKey] {
                     if isPreferred(assessment, over: existing.assessment) {
-                        acceptedByThread[threadKey] = (assessment, message, pk)
+                        acceptedByThread[threadKey] = (assessment, message, pk, parsedEmail)
                     }
                 } else {
-                    acceptedByThread[threadKey] = (assessment, message, pk)
+                    acceptedByThread[threadKey] = (assessment, message, pk, parsedEmail)
                 }
                 try? await candidateScoreRepository.delete(messagePk: pk)
             } else {
@@ -99,7 +99,8 @@ final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
                 from: entry.assessment,
                 message: entry.message,
                 mailboxAccountId: mailboxAccountId,
-                messagePk: entry.messagePk
+                messagePk: entry.messagePk,
+                email: entry.email
             )
         }
     }
@@ -120,7 +121,8 @@ final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
         from assessment: RuleAssessment,
         message: MessageRecord,
         mailboxAccountId: String,
-        messagePk: Int64
+        messagePk: Int64,
+        email: ParsedEmail? = nil
     ) -> ObligationRecord {
         guard let primaryHypothesisId = assessment.decisionContract.primaryHypothesisId,
               !primaryHypothesisId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -136,12 +138,28 @@ final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
             senderDomain: message.fromDomain,
             matchedRuleIds: assessment.matchedRuleIds
         )
+
+        let smartDeadline: DeadlineResult? = {
+            guard let email else { return nil }
+            return SmartDeadlineExtractor.extract(
+                subject: message.subject,
+                bodyHtml: email.bodyHtml,
+                actionableWindowText: email.actionableWindowText,
+                normalizedText: email.normalizedText,
+                referenceDate: message.internalDate
+            )
+        }()
+
+        let resolvedDeadline: Date? = email != nil
+            ? smartDeadline?.date
+            : assessment.deadline
+
         return ObligationRecord(
             mailboxAccountId: mailboxAccountId,
             messagePk: messagePk,
             category: assessment.category,
             title: message.subject,
-            deadlineAt: assessment.deadline,
+            deadlineAt: resolvedDeadline,
             risk: assessment.risk,
             whoOwes: .me,
             confidence: assessment.confidence,
@@ -155,7 +173,9 @@ final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
             reasonCode: reasonCode,
             policyVersion: policyVersion,
             repeatCount: 1,
-            lastSeenAt: message.internalDate
+            lastSeenAt: message.internalDate,
+            deadlineSource: smartDeadline?.source.rawValue,
+            contractConfidence: assessment.decisionContract.confidence.rawValue
         )
     }
 
@@ -206,10 +226,20 @@ final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
                 subject: parsedEmail.subject
             )
 
-            let promotion = mapLongScanPromotionDecision(
-                assessment: assessment,
+            let smartDeadline = SmartDeadlineExtractor.extract(
+                subject: message.subject,
+                bodyHtml: message.bodyHtml,
+                actionableWindowText: parsedEmail.actionableWindowText,
+                normalizedText: parsedEmail.normalizedText,
+                referenceDate: message.internalDate
+            )
+            let hasTrustedDeadline = smartDeadline?.date != nil
+            let (promotionDecision, promotionReasonCode) = resolvePromotion(
+                contract: assessment.decisionContract,
+                hasTrustedDeadline: hasTrustedDeadline,
                 blockedBySuppression: blockedBySuppression
             )
+
             let item = YearScanItem(
                 mailboxAccountId: mailboxAccountId,
                 messagePk: pk,
@@ -220,10 +250,11 @@ final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
                 score: assessment.score,
                 matchedReasons: assessment.matchedReasons,
                 source: .scan,
-                promotionDecision: promotion.decision,
-                promotionReasonCode: promotion.reasonCode,
+                promotionDecision: promotionDecision,
+                promotionReasonCode: promotionReasonCode,
                 confidence: assessment.confidence,
-                dueDate: assessment.deadline
+                dueDate: smartDeadline?.date,
+                deadlineSource: smartDeadline?.source
             )
 
             if let existing = bestByThread[threadKey] {
@@ -246,27 +277,33 @@ final class ObligationExtractor: ObligationExtracting, @unchecked Sendable {
         }
     }
 
-    private func mapLongScanPromotionDecision(
-        assessment: RuleAssessment,
+    /// Whether a year-scan candidate should be included in scan results.
+    /// Suppression is handled separately by the caller before invoking this.
+    /// Year scan only reaches this with `outcome == .accept` (see `evaluateYearScan`);
+    /// the `needsReview` branch is present for structural correctness should that change.
+    private func shouldPromote(_ contract: DecisionContract, hasTrustedDeadline: Bool) -> Bool {
+        switch contract.outcome {
+        case .accept: return true
+        case .needsReview: return hasTrustedDeadline
+        case .reject: return false
+        }
+    }
+
+    private func resolvePromotion(
+        contract: DecisionContract,
+        hasTrustedDeadline: Bool,
         blockedBySuppression: Bool
-    ) -> (decision: LongScanPromotionDecision, reasonCode: LongScanPromotionReasonCode) {
+    ) -> (LongScanPromotionDecision, LongScanPromotionReasonCode) {
         if blockedBySuppression {
             return (.dropped, .suppressed)
         }
-
-        // Precision-first guardrail for long scans.
-        if assessment.confidence < 0.62 {
-            return (.dropped, .lowConfidence)
-        }
-
-        guard assessment.deadline != nil else {
-            if assessment.confidence >= 0.80 {
-                return (.expectedEvent, .convertedExpectedEvent)
-            }
+        guard shouldPromote(contract, hasTrustedDeadline: hasTrustedDeadline) else {
             return (.dropped, .missingDueDate)
         }
-
-        return (.promoted, .promotedActionable)
+        if hasTrustedDeadline {
+            return (.promoted, .promotedActionable)
+        }
+        return (.expectedEvent, .convertedExpectedEvent)
     }
 
     private func bestDisplaySnippet(snippet: String, evidence: String, subject: String) -> String {

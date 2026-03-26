@@ -29,9 +29,11 @@ struct ObligationRecord: Identifiable, Hashable, Codable, FetchableRecord, Persi
     var resolvedAt: Date?
     var repeatCount: Int
     var lastSeenAt: Date?
+    var deadlineSource: String?
+    var contractConfidence: String?
     var createdAt: Date
     var updatedAt: Date
-    
+
     init(
         id: String = UUID().uuidString,
         mailboxAccountId: String,
@@ -56,6 +58,8 @@ struct ObligationRecord: Identifiable, Hashable, Codable, FetchableRecord, Persi
         resolvedAt: Date? = nil,
         repeatCount: Int = 1,
         lastSeenAt: Date? = nil,
+        deadlineSource: String? = nil,
+        contractConfidence: String? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -82,6 +86,8 @@ struct ObligationRecord: Identifiable, Hashable, Codable, FetchableRecord, Persi
         self.resolvedAt = resolvedAt
         self.repeatCount = repeatCount
         self.lastSeenAt = lastSeenAt
+        self.deadlineSource = deadlineSource
+        self.contractConfidence = contractConfidence
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }

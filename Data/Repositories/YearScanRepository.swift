@@ -25,7 +25,8 @@ protocol YearScanRepositorying: Sendable {
         coverageSummary: String,
         scanRangeMonths: Int,
         scanIntensity: String,
-        excludedProviderMessageIds: Set<String>
+        excludedProviderMessageIds: Set<String>,
+        mergeWithExisting: Bool
     ) async throws
     func upsertPartial(
         items: [YearScanItem],
@@ -63,10 +64,13 @@ final class YearScanRepository: YearScanRepositorying, @unchecked Sendable {
         coverageSummary: String,
         scanRangeMonths: Int,
         scanIntensity: String,
-        excludedProviderMessageIds: Set<String> = []
+        excludedProviderMessageIds: Set<String> = [],
+        mergeWithExisting: Bool = false
     ) async throws {
         try await database.writeAsync { db in
-            _ = try YearScanResultRecord.deleteAll(db)
+            if !mergeWithExisting {
+                _ = try YearScanResultRecord.deleteAll(db)
+            }
             let filteredItems = items.filter { !excludedProviderMessageIds.contains($0.providerMessageId) }
             let records = filteredItems.map(YearScanResultRecord.init(item:))
             for var record in records {

@@ -32,7 +32,9 @@ final class PolicyReplayHarnessTests: XCTestCase {
             senderDomain: "carrier.com",
             hasAttachments: false,
             labelIds: ["inbox"],
-            normalizedText: "delivery attempt failed please reschedule delivery before friday"
+            normalizedText: "delivery attempt failed please reschedule delivery before friday",
+            actionableWindowText: nil,
+            bodyHtml: nil
         )
         let assessment = engine.assess(email: email)
         if assessment.matchedRuleIds.contains(ObligationHypothesis.deliveryRequired.rawValue) {

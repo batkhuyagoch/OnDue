@@ -42,6 +42,7 @@ struct ObligationProjectionRecord: Identifiable, Hashable, Codable, FetchableRec
     var lastActionAt: Date?
     var reasonCode: String?
     var policyVersion: String?
+    var surfacingIntent: SurfacingIntent?
     var updatedAt: Date
 
     var id: String { obligationId }
@@ -55,6 +56,7 @@ struct ObligationListItem: Identifiable, Hashable {
     let lastActionAt: Date?
     let senderEmail: String?
     let senderDomain: String?
+    let surfacingIntent: SurfacingIntent?
 
     var id: String { obligation.id }
 }

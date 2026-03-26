@@ -10,6 +10,8 @@ struct ParsedEmail: Hashable {
     let hasAttachments: Bool
     let labelIds: [String]
     let normalizedText: String
+    let actionableWindowText: String?
+    let bodyHtml: String?
 }
 
 final class EmailParser {
@@ -27,7 +29,8 @@ final class EmailParser {
         } else {
             rawBody = ""
         }
-        let bodyText = boundedContext(from: rawBody)
+        let contextResult = boundedContextWithWindows(from: rawBody)
+        let bodyText = contextResult.text
         let labels = (message.labelIds ?? "")
             .split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
@@ -46,7 +49,9 @@ final class EmailParser {
             senderDomain: message.fromDomain,
             hasAttachments: message.hasAttachments,
             labelIds: labels,
-            normalizedText: normalizedText
+            normalizedText: normalizedText,
+            actionableWindowText: contextResult.actionableWindowText,
+            bodyHtml: message.bodyHtml
         )
     }
 
@@ -56,7 +61,7 @@ final class EmailParser {
         return normalized.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func boundedContext(from rawBody: String) -> String {
+    private func boundedContextWithWindows(from rawBody: String) -> (text: String, actionableWindowText: String?) {
         let precleanWasTruncated = rawBody.count > EmailContentBudget.htmlPrecleanCharsMax
         let preclean = String(rawBody.prefix(EmailContentBudget.htmlPrecleanCharsMax))
         let unquoted = stripQuotedText(preclean)
@@ -68,14 +73,15 @@ final class EmailParser {
                 Logger.info("email_context_debug body_truncated=\(precleanWasTruncated) css_artifact_lines_removed=\(cleanedResult.removedLineCount)")
             }
 #endif
-            return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+            return (cleaned.trimmingCharacters(in: .whitespacesAndNewlines), nil)
         }
         let windowed = extractActionableWindows(from: cleaned)
 #if DEBUG
         Logger.info("email_context_debug body_truncated=\(precleanWasTruncated || cleaned.count > EmailContentBudget.parsedContextCharsMax) css_artifact_lines_removed=\(cleanedResult.removedLineCount)")
 #endif
-        return String(windowed.prefix(EmailContentBudget.parsedContextCharsMax))
+        let text = String(windowed.prefix(EmailContentBudget.parsedContextCharsMax))
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (text, windowed.isEmpty ? nil : windowed)
     }
 
     private func stripQuotedText(_ text: String) -> String {

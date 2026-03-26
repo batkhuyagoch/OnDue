@@ -18,6 +18,18 @@ struct YearScanMonthSummary: Codable, Hashable, Identifiable {
     var completedAt: Date?
 }
 
+struct ScanDiagnostics: Codable, Hashable {
+    var lastStatusMessage: String?
+    var lastThrottleReason: String?
+    var lastKnownMemoryBytes: UInt64?
+    var lastKnownThermalState: String?
+    var lastKnownBatchSize: Int?
+    var configuredRangeMonths: Int?
+    var configuredIntensity: String?
+    var currentMonthLabel: String?
+    var currentPage: Int?
+}
+
 struct YearScanResumeState: Codable, Hashable {
     var accountIndex: Int
     var monthIndex: Int
@@ -26,17 +38,134 @@ struct YearScanResumeState: Codable, Hashable {
     var beforeDate: Date?
     var beforePk: Int64?
     var scannedMessageCount: Int
-    var lastStatusMessage: String?
     var consecutiveQuotaHits: Int
-    var lastThrottleReason: String? = nil
-    var lastKnownMemoryBytes: UInt64? = nil
-    var lastKnownThermalState: String? = nil
-    var lastKnownBatchSize: Int? = nil
-    var configuredRangeMonths: Int? = nil
-    var configuredIntensity: String? = nil
-    var currentMonthLabel: String? = nil
-    var currentPage: Int? = nil
-    var monthSummaries: [YearScanMonthSummary]? = nil
+    var monthSummaries: [YearScanMonthSummary]?
+    var diagnostics: ScanDiagnostics?
+
+    var lastStatusMessage: String? {
+        get { diagnostics?.lastStatusMessage }
+        set {
+            if diagnostics == nil { diagnostics = ScanDiagnostics() }
+            diagnostics?.lastStatusMessage = newValue
+        }
+    }
+    var lastThrottleReason: String? { diagnostics?.lastThrottleReason }
+    var lastKnownMemoryBytes: UInt64? { diagnostics?.lastKnownMemoryBytes }
+    var lastKnownThermalState: String? { diagnostics?.lastKnownThermalState }
+    var lastKnownBatchSize: Int? { diagnostics?.lastKnownBatchSize }
+    var configuredRangeMonths: Int? { diagnostics?.configuredRangeMonths }
+    var configuredIntensity: String? { diagnostics?.configuredIntensity }
+    var currentMonthLabel: String? { diagnostics?.currentMonthLabel }
+    var currentPage: Int? { diagnostics?.currentPage }
+
+    private enum CodingKeys: String, CodingKey {
+        case accountIndex, monthIndex, totalMonths, phase, beforeDate, beforePk
+        case scannedMessageCount, consecutiveQuotaHits, monthSummaries, diagnostics
+        // Legacy flat keys for backward-compatible decoding
+        case lastStatusMessage, lastThrottleReason, lastKnownMemoryBytes
+        case lastKnownThermalState, lastKnownBatchSize, configuredRangeMonths
+        case configuredIntensity, currentMonthLabel, currentPage
+    }
+
+    init(
+        accountIndex: Int,
+        monthIndex: Int,
+        totalMonths: Int,
+        phase: YearScanPhase,
+        beforeDate: Date? = nil,
+        beforePk: Int64? = nil,
+        scannedMessageCount: Int,
+        lastStatusMessage: String? = nil,
+        consecutiveQuotaHits: Int,
+        lastThrottleReason: String? = nil,
+        lastKnownMemoryBytes: UInt64? = nil,
+        lastKnownThermalState: String? = nil,
+        lastKnownBatchSize: Int? = nil,
+        configuredRangeMonths: Int? = nil,
+        configuredIntensity: String? = nil,
+        currentMonthLabel: String? = nil,
+        currentPage: Int? = nil,
+        monthSummaries: [YearScanMonthSummary]? = nil
+    ) {
+        self.accountIndex = accountIndex
+        self.monthIndex = monthIndex
+        self.totalMonths = totalMonths
+        self.phase = phase
+        self.beforeDate = beforeDate
+        self.beforePk = beforePk
+        self.scannedMessageCount = scannedMessageCount
+        self.consecutiveQuotaHits = consecutiveQuotaHits
+        self.monthSummaries = monthSummaries
+        let hasDiag = lastStatusMessage != nil || lastThrottleReason != nil
+            || lastKnownMemoryBytes != nil || lastKnownThermalState != nil
+            || lastKnownBatchSize != nil || configuredRangeMonths != nil
+            || configuredIntensity != nil || currentMonthLabel != nil || currentPage != nil
+        self.diagnostics = hasDiag ? ScanDiagnostics(
+            lastStatusMessage: lastStatusMessage,
+            lastThrottleReason: lastThrottleReason,
+            lastKnownMemoryBytes: lastKnownMemoryBytes,
+            lastKnownThermalState: lastKnownThermalState,
+            lastKnownBatchSize: lastKnownBatchSize,
+            configuredRangeMonths: configuredRangeMonths,
+            configuredIntensity: configuredIntensity,
+            currentMonthLabel: currentMonthLabel,
+            currentPage: currentPage
+        ) : nil
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        accountIndex = try container.decode(Int.self, forKey: .accountIndex)
+        monthIndex = try container.decode(Int.self, forKey: .monthIndex)
+        totalMonths = try container.decode(Int.self, forKey: .totalMonths)
+        phase = try container.decode(YearScanPhase.self, forKey: .phase)
+        beforeDate = try container.decodeIfPresent(Date.self, forKey: .beforeDate)
+        beforePk = try container.decodeIfPresent(Int64.self, forKey: .beforePk)
+        scannedMessageCount = try container.decode(Int.self, forKey: .scannedMessageCount)
+        consecutiveQuotaHits = try container.decode(Int.self, forKey: .consecutiveQuotaHits)
+        monthSummaries = try container.decodeIfPresent([YearScanMonthSummary].self, forKey: .monthSummaries)
+
+        if let nested = try container.decodeIfPresent(ScanDiagnostics.self, forKey: .diagnostics) {
+            diagnostics = nested
+        } else {
+            let msg = try container.decodeIfPresent(String.self, forKey: .lastStatusMessage)
+            let throttle = try container.decodeIfPresent(String.self, forKey: .lastThrottleReason)
+            let mem = try container.decodeIfPresent(UInt64.self, forKey: .lastKnownMemoryBytes)
+            let thermal = try container.decodeIfPresent(String.self, forKey: .lastKnownThermalState)
+            let batch = try container.decodeIfPresent(Int.self, forKey: .lastKnownBatchSize)
+            let range = try container.decodeIfPresent(Int.self, forKey: .configuredRangeMonths)
+            let intensity = try container.decodeIfPresent(String.self, forKey: .configuredIntensity)
+            let label = try container.decodeIfPresent(String.self, forKey: .currentMonthLabel)
+            let page = try container.decodeIfPresent(Int.self, forKey: .currentPage)
+            let hasDiag = msg != nil || throttle != nil || mem != nil || thermal != nil
+                || batch != nil || range != nil || intensity != nil || label != nil || page != nil
+            diagnostics = hasDiag ? ScanDiagnostics(
+                lastStatusMessage: msg,
+                lastThrottleReason: throttle,
+                lastKnownMemoryBytes: mem,
+                lastKnownThermalState: thermal,
+                lastKnownBatchSize: batch,
+                configuredRangeMonths: range,
+                configuredIntensity: intensity,
+                currentMonthLabel: label,
+                currentPage: page
+            ) : nil
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(accountIndex, forKey: .accountIndex)
+        try container.encode(monthIndex, forKey: .monthIndex)
+        try container.encode(totalMonths, forKey: .totalMonths)
+        try container.encode(phase, forKey: .phase)
+        try container.encodeIfPresent(beforeDate, forKey: .beforeDate)
+        try container.encodeIfPresent(beforePk, forKey: .beforePk)
+        try container.encode(scannedMessageCount, forKey: .scannedMessageCount)
+        try container.encode(consecutiveQuotaHits, forKey: .consecutiveQuotaHits)
+        try container.encodeIfPresent(monthSummaries, forKey: .monthSummaries)
+        try container.encodeIfPresent(diagnostics, forKey: .diagnostics)
+    }
 }
 
 struct YearScanSnapshot: Hashable {

@@ -14,9 +14,16 @@ struct SyncCoverageSettingsView: View {
     var body: some View {
         List {
             QuickSyncSection()
-            YearScanSection()
+            InboxHistorySection()
+            Section("Advanced") {
+                NavigationLink {
+                    SyncPolicyView()
+                } label: {
+                    Label("Sync policy", systemImage: "slider.horizontal.3")
+                }
+            }
         }
-        .navigationTitle("Sync & Coverage")
+        .navigationTitle("Inbox Coverage")
         .navigationBarTitleDisplayMode(.inline)
     }
 }

@@ -77,10 +77,10 @@ struct AccountSection: View {
 struct QuickSyncSection: View {
     @EnvironmentObject private var environmentStore: AppEnvironmentStore
     @EnvironmentObject private var authState: AuthenticationState
+    @EnvironmentObject private var yearScanState: YearScanState
     @StateObject private var viewModel = QuickSyncSectionViewModel()
-    @State private var showAdvanced = false
     @State private var showResetCheckpointConfirmation = false
-    
+
     var body: some View {
         Section {
             if let lastSync = viewModel.lastSyncDate {
@@ -89,7 +89,7 @@ struct QuickSyncSection: View {
                 Text("Never synced")
                     .foregroundStyle(.secondary)
             }
-            
+
             if let status = viewModel.syncStatus {
                 HStack {
                     if viewModel.isSyncing {
@@ -101,34 +101,17 @@ struct QuickSyncSection: View {
                         .foregroundStyle(viewModel.isSyncing ? .secondary : Color.green)
                 }
             }
-            
+
             if let error = viewModel.syncError {
                 Text(error)
                     .font(.caption)
                     .foregroundStyle(.red)
             }
-            
-            DisclosureGroup("Sync Options", isExpanded: $viewModel.showSyncOptions) {
-                VStack(spacing: 12) {
-                    Picker("Days to sync", selection: $viewModel.daysToSync) {
-                        Text("7 days").tag(7)
-                        Text("14 days").tag(14)
-                        Text("30 days").tag(30)
-                        Text("60 days").tag(60)
-                        Text("90 days").tag(90)
-                    }
-                    .pickerStyle(.menu)
-                    
-                    Toggle("Force full re-scan", isOn: $viewModel.forceFullSync)
-                        .font(.subheadline)
-                }
-                .padding(.vertical, 4)
-            }
-            
+
             if viewModel.isSyncing {
                 HStack {
                     ProgressView()
-                    Text("Syncing...")
+                    Text("Refreshing...")
                         .foregroundStyle(.secondary)
                 }
             } else {
@@ -140,23 +123,21 @@ struct QuickSyncSection: View {
                         )
                     }
                 } label: {
-                    Label("Sync Now (\(viewModel.daysToSync) days)", systemImage: "arrow.triangle.2.circlepath")
+                    Label("Refresh", systemImage: "arrow.triangle.2.circlepath")
                 }
-                .disabled(!authState.isSignedIn)
+                .disabled(!authState.isSignedIn || yearScanState.isScanning)
 
-                DisclosureGroup("Advanced", isExpanded: $showAdvanced) {
-                    Button(role: .destructive) {
-                        showResetCheckpointConfirmation = true
-                    } label: {
-                        Label("Reset Sync Checkpoint", systemImage: "arrow.counterclockwise")
-                    }
-                    .disabled(!authState.isSignedIn)
+                Button(role: .destructive) {
+                    showResetCheckpointConfirmation = true
+                } label: {
+                    Label("Reset Sync Checkpoint", systemImage: "arrow.counterclockwise")
                 }
+                .disabled(!authState.isSignedIn || yearScanState.isScanning)
             }
         } header: {
             Text("Quick Sync")
         } footer: {
-            Text("Syncs recent messages (\(viewModel.daysToSync) days) to find new obligations. Use 'Reset Sync Checkpoint' to force a complete re-download of the selected time range.")
+            Text("Checks recent emails for new obligations. Pull down on the main screen to refresh at any time.")
         }
         .confirmationDialog("Reset sync checkpoint?", isPresented: $showResetCheckpointConfirmation) {
             Button("Reset Checkpoint", role: .destructive) {
@@ -169,7 +150,7 @@ struct QuickSyncSection: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Next sync will re-download message history for the selected range.")
+            Text("Next refresh will re-download recent message history.")
         }
     }
 }
@@ -180,14 +161,11 @@ private final class QuickSyncSectionViewModel: ObservableObject {
     @Published var lastSyncDate: Date?
     @Published var syncStatus: String?
     @Published var syncError: String?
-    @Published var daysToSync = 30
-    @Published var forceFullSync = false
-    @Published var showSyncOptions = false
 
     func performQuickSync(environment: AppEnvironment, authState: AuthenticationState) async {
         guard authState.isSignedIn else { return }
         isSyncing = true
-        syncStatus = "Syncing \(daysToSync) days of messages..."
+        syncStatus = "Checking for new obligations..."
         syncError = nil
 
         do {
@@ -199,14 +177,17 @@ private final class QuickSyncSectionViewModel: ObservableObject {
 
             let report = try await environment.gmailSyncCoordinator.sync(
                 mailboxAccountId: account.id,
-                daysBack: daysToSync,
-                forceFullSync: forceFullSync
+                daysBack: 30,
+                forceFullSync: false
             )
 
             let now = Date()
             lastSyncDate = now
             authState.lastSyncDate = now
-            syncStatus = "Synced \(report.messagesSavedCount) messages, found \(report.obligationsCount) obligations"
+            let count = report.obligationsCount
+            syncStatus = count > 0
+                ? "Found \(count) new obligation\(count == 1 ? "" : "s")"
+                : "Up to date"
             isSyncing = false
 
             Task { @MainActor in
@@ -265,7 +246,6 @@ private final class QuickSyncSectionViewModel: ObservableObject {
                 )
             }
             syncStatus = "Checkpoint reset. Next sync will re-download all messages."
-            forceFullSync = true
 
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
@@ -318,22 +298,50 @@ private final class QuickSyncSectionViewModel: ObservableObject {
     }
 }
 
-struct YearScanSection: View {
+struct InboxHistorySection: View {
     @EnvironmentObject private var environmentStore: AppEnvironmentStore
     @EnvironmentObject private var yearScanState: YearScanState
     @State private var showCancelConfirmation = false
     @State private var showStartNewConfirmation = false
-    
+
+    private var policy: SyncPolicyStore { environmentStore.value.syncPolicyStore }
+
+    private var scanDepthBinding: Binding<Int> {
+        Binding(
+            get: { [3, 12, 24].contains(policy.coverageScanMonths) ? policy.coverageScanMonths : 12 },
+            set: { newValue in
+                if newValue == 24 { policy.longScanAndBackgroundOptIn = true }
+                policy.coverageScanMonths = newValue
+            }
+        )
+    }
+
     var body: some View {
         Section {
-            if let lastScan = yearScanState.lastScanDate {
-                LabeledContent("Last scan", value: lastScan.formatted(date: .abbreviated, time: .shortened))
-                LabeledContent("Items found", value: "\(yearScanState.foundItemsCount)")
-            } else {
-                Text("Never scanned")
-                    .foregroundStyle(.secondary)
+            if !yearScanState.isScanning {
+                Picker("Scan depth", selection: scanDepthBinding) {
+                    Text("Last 3 months").tag(3)
+                    Text("Last year").tag(12)
+                    Text("Last 2 years").tag(24)
+                }
+                .disabled(yearScanState.canResume)
+                if yearScanState.canResume {
+                    Text("Scan depth is locked while a paused scan is resumable. Use Start New Scan to change it.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
-            
+
+            if !yearScanState.isScanning {
+                if let lastScan = yearScanState.lastScanDate {
+                    LabeledContent("Last scan", value: lastScan.formatted(date: .abbreviated, time: .shortened))
+                    LabeledContent("Items found", value: "\(yearScanState.foundItemsCount)")
+                } else {
+                    Text("Never scanned")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
             if yearScanState.isScanning {
                 GroupBox {
                     VStack(alignment: .leading, spacing: 8) {
@@ -380,7 +388,12 @@ struct YearScanSection: View {
                                     ForEach(0..<totalMonths, id: \.self) { index in
                                         let isCompleted = index < currentMonthIndex
                                         let isCurrent = index == currentMonthIndex
-                                        Text("M\(index + 1)")
+                                        let label = pillLabel(
+                                            index: index,
+                                            totalMonths: totalMonths,
+                                            summaries: yearScanState.monthSummaries
+                                        )
+                                        Text(label)
                                             .font(.caption2.weight(.semibold))
                                             .padding(.horizontal, 8)
                                             .padding(.vertical, 4)
@@ -472,7 +485,7 @@ struct YearScanSection: View {
                         }
                     }
                 } label: {
-                    Label("Current scan", systemImage: "waveform.path.ecg")
+                    Label("In progress", systemImage: "waveform.path.ecg")
                         .font(.subheadline.weight(.semibold))
                 }
             } else if yearScanState.canResume {
@@ -481,7 +494,7 @@ struct YearScanSection: View {
                         await yearScanState.resumeScan(using: environmentStore.value)
                     }
                 } label: {
-                    Label("Resume Year Scan", systemImage: "play.fill")
+                    Label("Resume deep scan", systemImage: "play.fill")
                 }
 
                 Menu {
@@ -501,23 +514,21 @@ struct YearScanSection: View {
                 }
             } else {
                 Button {
-                    Task {
-                        await yearScanState.startScan(using: environmentStore.value)
-                    }
+                    Task { await yearScanState.startScan(using: environmentStore.value) }
                 } label: {
-                    Label("Run Year Scan Now", systemImage: "calendar.badge.clock")
+                    Label("Start deep scan", systemImage: "magnifyingglass.circle")
                 }
             }
-            
+
             NavigationLink {
                 YearScanHistoryView()
             } label: {
                 Label("Scan History", systemImage: "clock")
             }
         } header: {
-            Text("Year Scan")
+            Text("Deep Scan")
         } footer: {
-            Text("Deep scan of your past 365 days to find missed obligations. Use this occasionally or when you first start using the app. For daily use, use Quick Sync instead.")
+            Text("Scans your email history to find obligations you may have missed. Progress is saved — you can pause and resume at any time.")
         }
         .confirmationDialog(cancelDialogTitle, isPresented: $showCancelConfirmation) {
             Button(cancelDialogConfirmLabel, role: .destructive) {
@@ -541,6 +552,24 @@ struct YearScanSection: View {
         }
     }
 
+    // MARK: - Helpers
+
+    /// Returns an adaptive label for a month progress pill.
+    /// ≤ 6 months: abbreviated month name from summaries if available ("Jan", "Feb")
+    /// 7–15 months: short index label ("M1", "M2")
+    /// > 15 months: quarter label ("Q1", "Q2")
+    private func pillLabel(index: Int, totalMonths: Int, summaries: [YearScanMonthSummary]) -> String {
+        if totalMonths <= 6 {
+            if let summary = summaries.first(where: { $0.monthIndex == index }) {
+                return String(summary.monthLabel.prefix(3))
+            }
+        }
+        if totalMonths > 15 {
+            return "Q\((index / 3) + 1)"
+        }
+        return "M\(index + 1)"
+    }
+
     private func displayedMonthSummaries(_ summaries: [YearScanMonthSummary]) -> [YearScanMonthSummary] {
         let inProgress = summaries.filter(\.isInProgress).sorted { $0.monthIndex > $1.monthIndex }
         let completed = summaries.filter { !$0.isInProgress }.sorted { $0.monthIndex > $1.monthIndex }
@@ -552,7 +581,7 @@ struct YearScanSection: View {
     }
 
     private var cancelDialogTitle: String {
-        yearScanState.isScanning ? "Cancel current scan?" : "Discard paused checkpoint?"
+        yearScanState.isScanning ? "Cancel deep scan?" : "Discard paused checkpoint?"
     }
 
     private var cancelDialogConfirmLabel: String {
@@ -700,7 +729,7 @@ private final class NotificationsSectionViewModel: ObservableObject {
             await scheduleNotification(digestHour: digestHour, digestMinute: digestMinute)
             showError = nil
         } catch {
-            await onDisable()
+            onDisable()
             if case DigestError.notificationPermissionDenied = error {
                 showError = "Please enable notifications in Settings"
             } else {

@@ -17,16 +17,16 @@ enum DateParsing {
         #"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\.?\s+([0-9]{1,2})\b"#
     ]
 
-    static func parseDate(from text: String) -> Date? {
+    static func parseDate(from text: String, referenceDate: Date = Date()) -> Date? {
         guard let detector = dateDetector else { return nil }
         let range = NSRange(text.startIndex..., in: text)
         if let detected = detector.firstMatch(in: text, options: [], range: range)?.date {
             return detected
         }
-        return parseMonthDayFallback(from: text)
+        return parseMonthDayFallback(from: text, referenceDate: referenceDate)
     }
 
-    private static func parseMonthDayFallback(from text: String) -> Date? {
+    private static func parseMonthDayFallback(from text: String, referenceDate: Date) -> Date? {
         let lowered = text.lowercased()
         for pattern in monthDayPatterns {
             guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
@@ -50,24 +50,23 @@ enum DateParsing {
             }
 
             guard let monthNumber else { continue }
-            return makeDate(month: monthNumber, day: day)
+            return makeDate(month: monthNumber, day: day, referenceDate: referenceDate)
         }
         return nil
     }
 
-    private static func makeDate(month: Int, day: Int) -> Date? {
+    private static func makeDate(month: Int, day: Int, referenceDate: Date) -> Date? {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = .current
-        let now = Date()
-        let currentYear = calendar.component(.year, from: now)
+        let refYear = calendar.component(.year, from: referenceDate)
 
         var components = DateComponents()
-        components.year = currentYear
+        components.year = refYear
         components.month = month
         components.day = day
         guard var candidate = calendar.date(from: components) else { return nil }
-        if candidate < calendar.date(byAdding: .day, value: -1, to: now) ?? now {
-            components.year = currentYear + 1
+        if candidate < calendar.date(byAdding: .day, value: -1, to: referenceDate) ?? referenceDate {
+            components.year = refYear + 1
             candidate = calendar.date(from: components) ?? candidate
         }
         return candidate

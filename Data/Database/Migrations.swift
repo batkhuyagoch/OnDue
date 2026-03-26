@@ -627,5 +627,32 @@ enum Migrations {
             }
             try db.create(index: "year_scan_result_promotion_decision", on: "year_scan_result", columns: ["promotionDecision"])
         }
+
+        migrator.registerMigration("v26_deadline_source") { db in
+            let obligationColumns = try db.columns(in: "obligation").map(\.name)
+            if !obligationColumns.contains("deadlineSource") {
+                try db.alter(table: "obligation") { t in
+                    t.add(column: "deadlineSource", .text)
+                }
+            }
+        }
+
+        migrator.registerMigration("v27_contract_confidence") { db in
+            let obligationColumns = try db.columns(in: "obligation").map(\.name)
+            if !obligationColumns.contains("contractConfidence") {
+                try db.alter(table: "obligation") { t in
+                    t.add(column: "contractConfidence", .text)
+                }
+            }
+        }
+
+        migrator.registerMigration("v28_surfacing_intent") { db in
+            let projectionColumns = try db.columns(in: "obligation_projection").map(\.name)
+            if !projectionColumns.contains("surfacingIntent") {
+                try db.alter(table: "obligation_projection") { t in
+                    t.add(column: "surfacingIntent", .text)
+                }
+            }
+        }
     }
 }
